@@ -551,6 +551,9 @@ o4?.({ LitElement: i4 });
 
 // src/tuya-ev-charger-card.ts
 var PROFILE_OPTIONS = ["eco", "balanced", "fast"];
+var ATTR_CARD_ROLE = "tuya_ev_charger_card_role";
+var ATTR_CARD_INDEX = "tuya_ev_charger_card_index";
+var ATTR_CHARGER_TOKEN = "tuya_ev_charger_token";
 var TuyaEvChargerCard = class extends i4 {
   constructor() {
     super(...arguments);
@@ -796,39 +799,111 @@ var TuyaEvChargerCard = class extends i4 {
     const token = this._normalizeToken(this._config.charger_name);
     const cfg = this._config.entities ?? {};
     this._resolvedEntities = {
-      power: cfg.power ?? this._findEntity("sensor", ["power_l1"], token),
-      current: cfg.current ?? this._findEntity("sensor", ["current_l1"], token),
-      chargeCurrent: cfg.charge_current ?? this._findEntity("number", ["charge_current"], token),
-      chargeSession: cfg.charge_session ?? this._findEntity("switch", ["charge_session"], token),
-      surplusMode: cfg.surplus_mode ?? this._findEntity("switch", ["surplus_mode"], token),
-      surplusProfile: cfg.surplus_profile ?? this._findEntity("select", ["surplus_profile"], token),
-      regulationActive: cfg.regulation_active ?? this._findEntity("binary_sensor", ["surplus_regulation_active"], token),
-      lastDecision: cfg.last_decision ?? this._findEntity("sensor", ["surplus_last_decision_reason"], token),
-      surplusRaw: cfg.surplus_raw ?? this._findEntity("sensor", ["surplus_raw_w"], token),
-      surplusEffective: cfg.surplus_effective ?? this._findEntity("sensor", ["surplus_effective_w"], token),
+      power: cfg.power ?? this._findEntity("sensor", ["power_l1"], token, "power"),
+      current: cfg.current ?? this._findEntity("sensor", ["current_l1"], token, "current"),
+      chargeCurrent: cfg.charge_current ?? this._findEntity("number", ["charge_current"], token, "charge_current"),
+      chargeSession: cfg.charge_session ?? this._findEntity("switch", ["charge_session"], token, "charge_session"),
+      surplusMode: cfg.surplus_mode ?? this._findEntity("switch", ["surplus_mode"], token, "surplus_mode"),
+      surplusProfile: cfg.surplus_profile ?? this._findEntity("select", ["surplus_profile"], token, "surplus_profile"),
+      regulationActive: cfg.regulation_active ?? this._findEntity(
+        "binary_sensor",
+        ["surplus_regulation_active"],
+        token,
+        "regulation_active"
+      ),
+      lastDecision: cfg.last_decision ?? this._findEntity(
+        "sensor",
+        ["surplus_last_decision_reason"],
+        token,
+        "last_decision"
+      ),
+      surplusRaw: cfg.surplus_raw ?? this._findEntity("sensor", ["surplus_raw_w"], token, "surplus_raw"),
+      surplusEffective: cfg.surplus_effective ?? this._findEntity("sensor", ["surplus_effective_w"], token, "surplus_effective"),
       surplusDischargeOverLimit: cfg.surplus_discharge_over_limit ?? this._findEntity(
         "sensor",
         ["surplus_battery_discharge_over_limit_w"],
-        token
+        token,
+        "surplus_discharge_over_limit"
       ),
-      surplusTargetCurrent: cfg.surplus_target_current ?? this._findEntity("sensor", ["surplus_target_current_a"], token)
+      surplusTargetCurrent: cfg.surplus_target_current ?? this._findEntity(
+        "sensor",
+        ["surplus_target_current_a"],
+        token,
+        "surplus_target_current"
+      )
     };
   }
-  _findEntity(domain, suffixes, preferToken) {
+  _findEntity(domain, suffixes, preferToken, role) {
     if (!this.hass) {
       return void 0;
     }
     const all = Object.keys(this.hass.states).filter((entityId) => entityId.startsWith(`${domain}.`)).sort();
-    const matches = all.filter(
+    const roleMatches = all.filter((entityId) => this._entityRole(entityId) === role);
+    const rankedByRole = this._rankCandidates(roleMatches, preferToken);
+    if (rankedByRole.length) {
+      return rankedByRole[0];
+    }
+    const suffixMatches = all.filter(
       (entityId) => suffixes.some((suffix) => entityId.endsWith(`_${suffix}`) || entityId.endsWith(suffix))
     );
-    if (!matches.length) {
+    if (!suffixMatches.length) {
       return void 0;
     }
-    if (!preferToken) {
-      return matches[0];
+    const rankedBySuffix = this._rankCandidates(suffixMatches, preferToken);
+    if (rankedBySuffix.length) {
+      return rankedBySuffix[0];
     }
-    return matches.find((entityId) => entityId.includes(preferToken)) ?? matches[0];
+    return void 0;
+  }
+  _entityRole(entityId) {
+    const entity = this._entity(entityId);
+    return String(entity?.attributes[ATTR_CARD_ROLE] ?? "").trim();
+  }
+  _entityToken(entityId) {
+    const entity = this._entity(entityId);
+    return this._normalizeToken(String(entity?.attributes[ATTR_CHARGER_TOKEN] ?? ""));
+  }
+  _entityIndex(entityId) {
+    const entity = this._entity(entityId);
+    const parsed = Number(entity?.attributes[ATTR_CARD_INDEX]);
+    return Number.isFinite(parsed) ? parsed : 9999;
+  }
+  _rankCandidates(entityIds, preferToken) {
+    const ranked = entityIds.slice().sort((a3, b3) => {
+      const scoreDiff = this._tokenMatchScore(a3, preferToken) - this._tokenMatchScore(b3, preferToken);
+      if (scoreDiff !== 0) {
+        return scoreDiff;
+      }
+      const indexDiff = this._entityIndex(a3) - this._entityIndex(b3);
+      if (indexDiff !== 0) {
+        return indexDiff;
+      }
+      return a3.localeCompare(b3);
+    });
+    if (!preferToken) {
+      return ranked;
+    }
+    const strict = ranked.filter(
+      (entityId) => this._tokenMatchScore(entityId, preferToken) <= 1
+    );
+    return strict.length ? strict : ranked;
+  }
+  _tokenMatchScore(entityId, token) {
+    if (!token) {
+      return 1;
+    }
+    const technicalToken = this._entityToken(entityId);
+    if (technicalToken && technicalToken === token) {
+      return 0;
+    }
+    const objectId = this._normalizeToken(entityId.split(".")[1] ?? "");
+    if (objectId === token || objectId.startsWith(`${token}_`)) {
+      return 1;
+    }
+    if (objectId.includes(token)) {
+      return 2;
+    }
+    return 3;
   }
   _normalizeToken(input) {
     return String(input ?? "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "_");
@@ -1448,6 +1523,26 @@ var TuyaEvChargerCardEditor = class extends i4 {
     if (!this.hass) {
       return [];
     }
+    const technicalTokens = /* @__PURE__ */ new Map();
+    const eligibleRoles = new Set(ENTITY_FIELD_SPECS.map((field) => field.key));
+    Object.keys(this.hass.states).forEach((entityId) => {
+      const token = this._entityToken(entityId);
+      const role = this._entityRole(entityId);
+      if (!token || !role || !eligibleRoles.has(role)) {
+        return;
+      }
+      const roles = technicalTokens.get(token) ?? /* @__PURE__ */ new Set();
+      roles.add(role);
+      technicalTokens.set(token, roles);
+    });
+    const technicalRanked = [...technicalTokens.entries()].filter(([, roles]) => roles.size >= 2).sort((a3, b3) => b3[1].size - a3[1].size || a3[0].localeCompare(b3[0])).map(([token]) => token);
+    if (technicalRanked.length) {
+      const selected2 = normalizeToken(this._config.charger_name);
+      if (selected2 && !technicalRanked.includes(selected2)) {
+        technicalRanked.unshift(selected2);
+      }
+      return technicalRanked.slice(0, 20);
+    }
     const weighted = /* @__PURE__ */ new Map();
     const all = Object.keys(this.hass.states).sort();
     for (const field of ENTITY_FIELD_SPECS) {
@@ -1499,15 +1594,20 @@ var TuyaEvChargerCardEditor = class extends i4 {
     const all = Object.keys(this.hass.states).filter(
       (entityId) => entityId.startsWith(prefix)
     );
+    const roleMatches = all.filter((entityId) => this._entityRole(entityId) === field.key);
     const matchingSuffix = all.filter(
       (entityId) => this._matchesSuffix(entityId, field.suffixes)
     );
-    const source = (matchingSuffix.length ? matchingSuffix : all).slice();
+    const source = (roleMatches.length ? roleMatches : matchingSuffix.length ? matchingSuffix : all).slice();
     source.sort((a3, b3) => {
       const aScore = this._tokenScore(a3, token);
       const bScore = this._tokenScore(b3, token);
       if (aScore !== bScore) {
         return aScore - bScore;
+      }
+      const indexDiff = this._entityIndex(a3) - this._entityIndex(b3);
+      if (indexDiff !== 0) {
+        return indexDiff;
       }
       return a3.localeCompare(b3);
     });
@@ -1540,6 +1640,17 @@ var TuyaEvChargerCardEditor = class extends i4 {
       return void 0;
     }
     const all = Object.keys(this.hass.states).filter((entityId) => entityId.startsWith(`${field.domain}.`)).sort();
+    const roleMatches = all.filter((entityId) => this._entityRole(entityId) === field.key);
+    const rankedByRole = roleMatches.sort((a3, b3) => {
+      const scoreDiff = this._tokenScore(a3, token) - this._tokenScore(b3, token);
+      if (scoreDiff !== 0) {
+        return scoreDiff;
+      }
+      return this._entityIndex(a3) - this._entityIndex(b3);
+    });
+    if (rankedByRole.length) {
+      return rankedByRole[0];
+    }
     const matches = all.filter(
       (entityId) => this._matchesSuffix(entityId, field.suffixes)
     );
@@ -1558,6 +1669,27 @@ var TuyaEvChargerCardEditor = class extends i4 {
       (suffix) => entityId.endsWith(`_${suffix}`) || entityId.endsWith(suffix)
     );
   }
+  _entityRole(entityId) {
+    if (!this.hass) {
+      return "";
+    }
+    return String(this.hass.states[entityId]?.attributes[ATTR_CARD_ROLE] ?? "").trim();
+  }
+  _entityToken(entityId) {
+    if (!this.hass) {
+      return "";
+    }
+    const raw = this.hass.states[entityId]?.attributes[ATTR_CHARGER_TOKEN];
+    return normalizeToken(String(raw ?? ""));
+  }
+  _entityIndex(entityId) {
+    if (!this.hass) {
+      return 9999;
+    }
+    const raw = this.hass.states[entityId]?.attributes[ATTR_CARD_INDEX];
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : 9999;
+  }
   _candidatePrefixTokens(objectId) {
     const normalized = normalizeToken(objectId);
     const parts = normalized.split("_").filter(Boolean);
@@ -1572,19 +1704,23 @@ var TuyaEvChargerCardEditor = class extends i4 {
   }
   _tokenScore(entityId, token) {
     if (!token) {
-      return 2;
+      return 1;
+    }
+    const technicalToken = this._entityToken(entityId);
+    if (technicalToken && technicalToken === token) {
+      return 0;
     }
     const objectId = normalizeToken(entityId.split(".")[1] ?? "");
     if (!objectId) {
-      return 3;
+      return 4;
     }
     if (objectId === token || objectId.startsWith(`${token}_`)) {
-      return 0;
-    }
-    if (objectId.includes(token)) {
       return 1;
     }
-    return 2;
+    if (objectId.includes(token)) {
+      return 2;
+    }
+    return 3;
   }
   _extractToken(entityId, suffixes) {
     const objectId = entityId.split(".")[1] ?? "";

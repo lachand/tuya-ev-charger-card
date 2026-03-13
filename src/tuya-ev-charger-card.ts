@@ -58,6 +58,9 @@ interface GraphSample {
 }
 
 const PROFILE_OPTIONS = ["eco", "balanced", "fast"] as const;
+const ATTR_CARD_ROLE = "tuya_ev_charger_card_role";
+const ATTR_CARD_INDEX = "tuya_ev_charger_card_index";
+const ATTR_CHARGER_TOKEN = "tuya_ev_charger_token";
 
 class TuyaEvChargerCard extends LitElement {
   public hass?: HomeAssistant;
@@ -342,51 +345,68 @@ class TuyaEvChargerCard extends LitElement {
     this._resolvedEntities = {
       power:
         cfg.power ??
-        this._findEntity("sensor", ["power_l1"], token),
+        this._findEntity("sensor", ["power_l1"], token, "power"),
       current:
         cfg.current ??
-        this._findEntity("sensor", ["current_l1"], token),
+        this._findEntity("sensor", ["current_l1"], token, "current"),
       chargeCurrent:
         cfg.charge_current ??
-        this._findEntity("number", ["charge_current"], token),
+        this._findEntity("number", ["charge_current"], token, "charge_current"),
       chargeSession:
         cfg.charge_session ??
-        this._findEntity("switch", ["charge_session"], token),
+        this._findEntity("switch", ["charge_session"], token, "charge_session"),
       surplusMode:
         cfg.surplus_mode ??
-        this._findEntity("switch", ["surplus_mode"], token),
+        this._findEntity("switch", ["surplus_mode"], token, "surplus_mode"),
       surplusProfile:
         cfg.surplus_profile ??
-        this._findEntity("select", ["surplus_profile"], token),
+        this._findEntity("select", ["surplus_profile"], token, "surplus_profile"),
       regulationActive:
         cfg.regulation_active ??
-        this._findEntity("binary_sensor", ["surplus_regulation_active"], token),
+        this._findEntity(
+          "binary_sensor",
+          ["surplus_regulation_active"],
+          token,
+          "regulation_active"
+        ),
       lastDecision:
         cfg.last_decision ??
-        this._findEntity("sensor", ["surplus_last_decision_reason"], token),
+        this._findEntity(
+          "sensor",
+          ["surplus_last_decision_reason"],
+          token,
+          "last_decision"
+        ),
       surplusRaw:
         cfg.surplus_raw ??
-        this._findEntity("sensor", ["surplus_raw_w"], token),
+        this._findEntity("sensor", ["surplus_raw_w"], token, "surplus_raw"),
       surplusEffective:
         cfg.surplus_effective ??
-        this._findEntity("sensor", ["surplus_effective_w"], token),
+        this._findEntity("sensor", ["surplus_effective_w"], token, "surplus_effective"),
       surplusDischargeOverLimit:
         cfg.surplus_discharge_over_limit ??
         this._findEntity(
           "sensor",
           ["surplus_battery_discharge_over_limit_w"],
-          token
+          token,
+          "surplus_discharge_over_limit"
         ),
       surplusTargetCurrent:
         cfg.surplus_target_current ??
-        this._findEntity("sensor", ["surplus_target_current_a"], token),
+        this._findEntity(
+          "sensor",
+          ["surplus_target_current_a"],
+          token,
+          "surplus_target_current"
+        ),
     };
   }
 
   private _findEntity(
     domain: string,
     suffixes: string[],
-    preferToken: string
+    preferToken: string,
+    role: string
   ): string | undefined {
     if (!this.hass) {
       return undefined;
@@ -394,16 +414,79 @@ class TuyaEvChargerCard extends LitElement {
     const all = Object.keys(this.hass.states)
       .filter((entityId) => entityId.startsWith(`${domain}.`))
       .sort();
-    const matches = all.filter((entityId) =>
+    const roleMatches = all.filter((entityId) => this._entityRole(entityId) === role);
+    const rankedByRole = this._rankCandidates(roleMatches, preferToken);
+    if (rankedByRole.length) {
+      return rankedByRole[0];
+    }
+
+    const suffixMatches = all.filter((entityId) =>
       suffixes.some((suffix) => entityId.endsWith(`_${suffix}`) || entityId.endsWith(suffix))
     );
-    if (!matches.length) {
+    if (!suffixMatches.length) {
       return undefined;
     }
-    if (!preferToken) {
-      return matches[0];
+    const rankedBySuffix = this._rankCandidates(suffixMatches, preferToken);
+    if (rankedBySuffix.length) {
+      return rankedBySuffix[0];
     }
-    return matches.find((entityId) => entityId.includes(preferToken)) ?? matches[0];
+    return undefined;
+  }
+
+  private _entityRole(entityId: string): string {
+    const entity = this._entity(entityId);
+    return String(entity?.attributes[ATTR_CARD_ROLE] ?? "").trim();
+  }
+
+  private _entityToken(entityId: string): string {
+    const entity = this._entity(entityId);
+    return this._normalizeToken(String(entity?.attributes[ATTR_CHARGER_TOKEN] ?? ""));
+  }
+
+  private _entityIndex(entityId: string): number {
+    const entity = this._entity(entityId);
+    const parsed = Number(entity?.attributes[ATTR_CARD_INDEX]);
+    return Number.isFinite(parsed) ? parsed : 9999;
+  }
+
+  private _rankCandidates(entityIds: string[], preferToken: string): string[] {
+    const ranked = entityIds.slice().sort((a, b) => {
+      const scoreDiff =
+        this._tokenMatchScore(a, preferToken) - this._tokenMatchScore(b, preferToken);
+      if (scoreDiff !== 0) {
+        return scoreDiff;
+      }
+      const indexDiff = this._entityIndex(a) - this._entityIndex(b);
+      if (indexDiff !== 0) {
+        return indexDiff;
+      }
+      return a.localeCompare(b);
+    });
+    if (!preferToken) {
+      return ranked;
+    }
+    const strict = ranked.filter(
+      (entityId) => this._tokenMatchScore(entityId, preferToken) <= 1
+    );
+    return strict.length ? strict : ranked;
+  }
+
+  private _tokenMatchScore(entityId: string, token: string): number {
+    if (!token) {
+      return 1;
+    }
+    const technicalToken = this._entityToken(entityId);
+    if (technicalToken && technicalToken === token) {
+      return 0;
+    }
+    const objectId = this._normalizeToken(entityId.split(".")[1] ?? "");
+    if (objectId === token || objectId.startsWith(`${token}_`)) {
+      return 1;
+    }
+    if (objectId.includes(token)) {
+      return 2;
+    }
+    return 3;
   }
 
   private _normalizeToken(input?: string): string {
@@ -1089,6 +1172,31 @@ class TuyaEvChargerCardEditor extends LitElement {
     if (!this.hass) {
       return [];
     }
+    const technicalTokens = new Map<string, Set<EntityFieldKey>>();
+    const eligibleRoles = new Set(ENTITY_FIELD_SPECS.map((field) => field.key));
+    Object.keys(this.hass.states).forEach((entityId) => {
+      const token = this._entityToken(entityId);
+      const role = this._entityRole(entityId) as EntityFieldKey;
+      if (!token || !role || !eligibleRoles.has(role)) {
+        return;
+      }
+      const roles = technicalTokens.get(token) ?? new Set<EntityFieldKey>();
+      roles.add(role);
+      technicalTokens.set(token, roles);
+    });
+
+    const technicalRanked = [...technicalTokens.entries()]
+      .filter(([, roles]) => roles.size >= 2)
+      .sort((a, b) => b[1].size - a[1].size || a[0].localeCompare(b[0]))
+      .map(([token]) => token);
+    if (technicalRanked.length) {
+      const selected = normalizeToken(this._config.charger_name);
+      if (selected && !technicalRanked.includes(selected)) {
+        technicalRanked.unshift(selected);
+      }
+      return technicalRanked.slice(0, 20);
+    }
+
     const weighted = new Map<string, { count: number; domains: Set<string> }>();
     const all = Object.keys(this.hass.states).sort();
 
@@ -1150,15 +1258,20 @@ class TuyaEvChargerCardEditor extends LitElement {
     const all = Object.keys(this.hass.states).filter((entityId) =>
       entityId.startsWith(prefix)
     );
+    const roleMatches = all.filter((entityId) => this._entityRole(entityId) === field.key);
     const matchingSuffix = all.filter((entityId) =>
       this._matchesSuffix(entityId, field.suffixes)
     );
-    const source = (matchingSuffix.length ? matchingSuffix : all).slice();
+    const source = (roleMatches.length ? roleMatches : matchingSuffix.length ? matchingSuffix : all).slice();
     source.sort((a, b) => {
       const aScore = this._tokenScore(a, token);
       const bScore = this._tokenScore(b, token);
       if (aScore !== bScore) {
         return aScore - bScore;
+      }
+      const indexDiff = this._entityIndex(a) - this._entityIndex(b);
+      if (indexDiff !== 0) {
+        return indexDiff;
       }
       return a.localeCompare(b);
     });
@@ -1197,6 +1310,17 @@ class TuyaEvChargerCardEditor extends LitElement {
     const all = Object.keys(this.hass.states)
       .filter((entityId) => entityId.startsWith(`${field.domain}.`))
       .sort();
+    const roleMatches = all.filter((entityId) => this._entityRole(entityId) === field.key);
+    const rankedByRole = roleMatches.sort((a, b) => {
+      const scoreDiff = this._tokenScore(a, token) - this._tokenScore(b, token);
+      if (scoreDiff !== 0) {
+        return scoreDiff;
+      }
+      return this._entityIndex(a) - this._entityIndex(b);
+    });
+    if (rankedByRole.length) {
+      return rankedByRole[0];
+    }
     const matches = all.filter((entityId) =>
       this._matchesSuffix(entityId, field.suffixes)
     );
@@ -1219,6 +1343,30 @@ class TuyaEvChargerCardEditor extends LitElement {
     );
   }
 
+  private _entityRole(entityId: string): string {
+    if (!this.hass) {
+      return "";
+    }
+    return String(this.hass.states[entityId]?.attributes[ATTR_CARD_ROLE] ?? "").trim();
+  }
+
+  private _entityToken(entityId: string): string {
+    if (!this.hass) {
+      return "";
+    }
+    const raw = this.hass.states[entityId]?.attributes[ATTR_CHARGER_TOKEN];
+    return normalizeToken(String(raw ?? ""));
+  }
+
+  private _entityIndex(entityId: string): number {
+    if (!this.hass) {
+      return 9999;
+    }
+    const raw = this.hass.states[entityId]?.attributes[ATTR_CARD_INDEX];
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : 9999;
+  }
+
   private _candidatePrefixTokens(objectId: string): string[] {
     const normalized = normalizeToken(objectId);
     const parts = normalized.split("_").filter(Boolean);
@@ -1234,19 +1382,23 @@ class TuyaEvChargerCardEditor extends LitElement {
 
   private _tokenScore(entityId: string, token: string): number {
     if (!token) {
-      return 2;
+      return 1;
+    }
+    const technicalToken = this._entityToken(entityId);
+    if (technicalToken && technicalToken === token) {
+      return 0;
     }
     const objectId = normalizeToken(entityId.split(".")[1] ?? "");
     if (!objectId) {
-      return 3;
+      return 4;
     }
     if (objectId === token || objectId.startsWith(`${token}_`)) {
-      return 0;
-    }
-    if (objectId.includes(token)) {
       return 1;
     }
-    return 2;
+    if (objectId.includes(token)) {
+      return 2;
+    }
+    return 3;
   }
 
   private _extractToken(
