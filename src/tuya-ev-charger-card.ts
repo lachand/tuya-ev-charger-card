@@ -884,20 +884,93 @@ customElements.define("tuya-ev-charger-card", TuyaEvChargerCard);
 
 type EntityFieldKey = keyof NonNullable<CardConfig["entities"]>;
 
-const ENTITY_FIELD_LABELS: Array<{ key: EntityFieldKey; label: string }> = [
-  { key: "charge_session", label: "Charge session switch" },
-  { key: "surplus_mode", label: "Surplus mode switch" },
-  { key: "surplus_profile", label: "Surplus profile select" },
-  { key: "charge_current", label: "Charge current number" },
-  { key: "power", label: "Power sensor" },
-  { key: "current", label: "Current sensor" },
-  { key: "last_decision", label: "Last decision sensor" },
-  { key: "surplus_effective", label: "Effective surplus sensor" },
-  { key: "surplus_raw", label: "Raw surplus sensor" },
-  { key: "surplus_discharge_over_limit", label: "Battery over-limit sensor" },
-  { key: "surplus_target_current", label: "Target current sensor" },
-  { key: "regulation_active", label: "Regulation active binary sensor" },
+type EntityFieldSpec = {
+  key: EntityFieldKey;
+  label: string;
+  domain: string;
+  suffixes: string[];
+};
+
+const ENTITY_FIELD_SPECS: EntityFieldSpec[] = [
+  {
+    key: "charge_session",
+    label: "Charge session switch",
+    domain: "switch",
+    suffixes: ["charge_session"],
+  },
+  {
+    key: "surplus_mode",
+    label: "Surplus mode switch",
+    domain: "switch",
+    suffixes: ["surplus_mode"],
+  },
+  {
+    key: "surplus_profile",
+    label: "Surplus profile select",
+    domain: "select",
+    suffixes: ["surplus_profile"],
+  },
+  {
+    key: "charge_current",
+    label: "Charge current number",
+    domain: "number",
+    suffixes: ["charge_current"],
+  },
+  {
+    key: "power",
+    label: "Power sensor",
+    domain: "sensor",
+    suffixes: ["power_l1"],
+  },
+  {
+    key: "current",
+    label: "Current sensor",
+    domain: "sensor",
+    suffixes: ["current_l1"],
+  },
+  {
+    key: "last_decision",
+    label: "Last decision sensor",
+    domain: "sensor",
+    suffixes: ["surplus_last_decision_reason"],
+  },
+  {
+    key: "surplus_effective",
+    label: "Effective surplus sensor",
+    domain: "sensor",
+    suffixes: ["surplus_effective_w"],
+  },
+  {
+    key: "surplus_raw",
+    label: "Raw surplus sensor",
+    domain: "sensor",
+    suffixes: ["surplus_raw_w"],
+  },
+  {
+    key: "surplus_discharge_over_limit",
+    label: "Battery over-limit sensor",
+    domain: "sensor",
+    suffixes: ["surplus_battery_discharge_over_limit_w"],
+  },
+  {
+    key: "surplus_target_current",
+    label: "Target current sensor",
+    domain: "sensor",
+    suffixes: ["surplus_target_current_a"],
+  },
+  {
+    key: "regulation_active",
+    label: "Regulation active binary sensor",
+    domain: "binary_sensor",
+    suffixes: ["surplus_regulation_active"],
+  },
 ];
+
+const normalizeToken = (input?: string): string =>
+  String(input ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, "_");
 
 class TuyaEvChargerCardEditor extends LitElement {
   public hass?: HomeAssistant;
@@ -919,6 +992,8 @@ class TuyaEvChargerCardEditor extends LitElement {
   protected render() {
     const cfg = this._config;
     const entities = cfg.entities ?? {};
+    const detectedTokens = this._detectedChargerTokens();
+    const selectedToken = normalizeToken(cfg.charger_name);
     return html`
       <div class="editor">
         <h3>Layout</h3>
@@ -932,7 +1007,30 @@ class TuyaEvChargerCardEditor extends LitElement {
           />
         </label>
         <label>
-          <span>Charger token (for auto-detection)</span>
+          <span>Detected EV Charger instance</span>
+          <div class="inline">
+            <select
+              .value=${selectedToken}
+              @change=${(event: Event) =>
+                this._autoFillFromToken((event.target as HTMLSelectElement).value)}
+            >
+              <option value="">Select...</option>
+              ${detectedTokens.map(
+                (token) => html`<option value=${token}>${token}</option>`
+              )}
+            </select>
+            <button
+              type="button"
+              class="action"
+              @click=${() => this._autoFillFromToken(cfg.charger_name ?? "")}
+              ?disabled=${!selectedToken}
+            >
+              Auto-fill
+            </button>
+          </div>
+        </label>
+        <label>
+          <span>Charger token (advanced)</span>
           <input
             type="text"
             .value=${cfg.charger_name ?? ""}
@@ -958,23 +1056,27 @@ class TuyaEvChargerCardEditor extends LitElement {
 
         <h3>Entity overrides</h3>
         <p class="hint">
-          Optional. Leave empty to keep auto-detection.
+          Optional. Keep "Auto-detected" when possible.
         </p>
         <div class="grid">
-          ${ENTITY_FIELD_LABELS.map(
-            ({ key, label }) => html`
+          ${ENTITY_FIELD_SPECS.map(
+            (field) => html`
               <label>
-                <span>${label}</span>
-                <input
-                  type="text"
-                  .value=${entities[key] ?? ""}
-                  placeholder="entity_id"
-                  @input=${(event: Event) =>
+                <span>${field.label}</span>
+                <select
+                  .value=${entities[field.key] ?? ""}
+                  @change=${(event: Event) =>
                     this._updateEntity(
-                      key,
-                      (event.target as HTMLInputElement).value
+                      field.key,
+                      (event.target as HTMLSelectElement).value
                     )}
-                />
+                >
+                  <option value="">Auto-detected</option>
+                  ${this._entityOptions(field).map(
+                    (entityId) =>
+                      html`<option value=${entityId}>${entityId}</option>`
+                  )}
+                </select>
               </label>
             `
           )}
@@ -983,9 +1085,134 @@ class TuyaEvChargerCardEditor extends LitElement {
     `;
   }
 
+  private _detectedChargerTokens(): string[] {
+    if (!this.hass) {
+      return [];
+    }
+    const tokens = new Set<string>();
+    for (const field of ENTITY_FIELD_SPECS) {
+      const prefix = `${field.domain}.`;
+      Object.keys(this.hass.states)
+        .filter((entityId) => entityId.startsWith(prefix))
+        .forEach((entityId) => {
+          const token = this._extractToken(entityId, field.suffixes);
+          if (token) {
+            tokens.add(token);
+          }
+        });
+    }
+    return [...tokens].sort((a, b) => a.localeCompare(b));
+  }
+
+  private _entityOptions(field: EntityFieldSpec): string[] {
+    if (!this.hass) {
+      return [];
+    }
+    const token = normalizeToken(this._config.charger_name);
+    const prefix = `${field.domain}.`;
+    const all = Object.keys(this.hass.states).filter((entityId) =>
+      entityId.startsWith(prefix)
+    );
+    const matchingSuffix = all.filter((entityId) =>
+      this._matchesSuffix(entityId, field.suffixes)
+    );
+    const source = (matchingSuffix.length ? matchingSuffix : all).slice();
+    source.sort((a, b) => {
+      const aScore = token && a.includes(token) ? 0 : 1;
+      const bScore = token && b.includes(token) ? 0 : 1;
+      if (aScore !== bScore) {
+        return aScore - bScore;
+      }
+      return a.localeCompare(b);
+    });
+    return source;
+  }
+
+  private _autoFillFromToken(rawToken: string): void {
+    const token = normalizeToken(rawToken);
+    const next: CardConfig = { ...this._config };
+    if (token) {
+      next.charger_name = token;
+    } else {
+      delete next.charger_name;
+    }
+
+    const entities: NonNullable<CardConfig["entities"]> = {};
+    for (const field of ENTITY_FIELD_SPECS) {
+      const guessed = this._guessEntity(field, token);
+      if (guessed) {
+        entities[field.key] = guessed;
+      }
+    }
+
+    if (Object.keys(entities).length) {
+      next.entities = entities;
+    } else {
+      delete next.entities;
+    }
+    this._emit(next);
+  }
+
+  private _guessEntity(field: EntityFieldSpec, token: string): string | undefined {
+    if (!this.hass) {
+      return undefined;
+    }
+    const all = Object.keys(this.hass.states)
+      .filter((entityId) => entityId.startsWith(`${field.domain}.`))
+      .sort();
+    const matches = all.filter((entityId) =>
+      this._matchesSuffix(entityId, field.suffixes)
+    );
+    if (!matches.length) {
+      return undefined;
+    }
+    if (!token) {
+      return matches[0];
+    }
+    return matches.find((entityId) => entityId.includes(token)) ?? matches[0];
+  }
+
+  private _matchesSuffix(entityId: string, suffixes: string[]): boolean {
+    return suffixes.some(
+      (suffix) => entityId.endsWith(`_${suffix}`) || entityId.endsWith(suffix)
+    );
+  }
+
+  private _extractToken(
+    entityId: string,
+    suffixes: string[]
+  ): string | undefined {
+    const objectId = entityId.split(".")[1] ?? "";
+    if (!objectId) {
+      return undefined;
+    }
+
+    for (const suffix of suffixes) {
+      if (objectId === suffix) {
+        continue;
+      }
+      const underscored = `_${suffix}`;
+      if (objectId.endsWith(underscored)) {
+        const token = normalizeToken(
+          objectId.slice(0, objectId.length - underscored.length)
+        );
+        return token || undefined;
+      }
+      if (objectId.endsWith(suffix)) {
+        const token = normalizeToken(
+          objectId
+            .slice(0, objectId.length - suffix.length)
+            .replace(/_+$/, "")
+        );
+        return token || undefined;
+      }
+    }
+    return undefined;
+  }
+
   private _updateRootText(key: "title" | "charger_name", value: string): void {
     const next: CardConfig = { ...this._config };
-    const trimmed = value.trim();
+    const trimmed = key === "charger_name" ? normalizeToken(value) : value.trim();
     if (trimmed) {
       next[key] = trimmed;
     } else {
@@ -1065,6 +1292,12 @@ class TuyaEvChargerCardEditor extends LitElement {
       gap: 8px;
     }
 
+    .inline {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+    }
+
     label {
       display: grid;
       gap: 4px;
@@ -1075,7 +1308,8 @@ class TuyaEvChargerCardEditor extends LitElement {
       color: var(--secondary-text-color);
     }
 
-    input {
+    input,
+    select {
       height: 34px;
       border: 1px solid rgba(120, 135, 150, 0.35);
       border-radius: 9px;
@@ -1083,6 +1317,24 @@ class TuyaEvChargerCardEditor extends LitElement {
       font: inherit;
       background: var(--card-background-color);
       color: var(--primary-text-color);
+    }
+
+    .action {
+      height: 34px;
+      padding: 0 12px;
+      border: 1px solid rgba(45, 106, 79, 0.45);
+      border-radius: 9px;
+      font: inherit;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: #204738;
+      background: rgba(45, 106, 79, 0.14);
+      cursor: pointer;
+    }
+
+    .action:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
     }
   `;
 }

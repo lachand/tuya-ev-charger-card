@@ -10,7 +10,7 @@ Modern and sober UI with:
 - Charge current adjust (`number.charge_current`)
 - Mini graph (power and effective surplus)
 - Details panel with debug values
-- Built-in Lovelace visual editor (auto-detection + entity overrides)
+- Built-in Lovelace visual editor (instance auto-detection + dropdown entity selectors + auto-fill)
 
 ## Installation (HACS)
 
