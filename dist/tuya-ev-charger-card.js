@@ -1448,17 +1448,47 @@ var TuyaEvChargerCardEditor = class extends i4 {
     if (!this.hass) {
       return [];
     }
-    const tokens = /* @__PURE__ */ new Set();
+    const weighted = /* @__PURE__ */ new Map();
+    const all = Object.keys(this.hass.states).sort();
     for (const field of ENTITY_FIELD_SPECS) {
       const prefix = `${field.domain}.`;
-      Object.keys(this.hass.states).filter((entityId) => entityId.startsWith(prefix)).forEach((entityId) => {
+      all.filter((entityId) => entityId.startsWith(prefix)).forEach((entityId) => {
         const token = this._extractToken(entityId, field.suffixes);
-        if (token) {
-          tokens.add(token);
+        if (!token) {
+          return;
         }
+        const bucket = weighted.get(token) ?? { count: 0, domains: /* @__PURE__ */ new Set() };
+        bucket.count += 4;
+        bucket.domains.add(field.domain);
+        weighted.set(token, bucket);
       });
     }
-    return [...tokens].sort((a3, b3) => a3.localeCompare(b3));
+    const eligibleDomains = new Set(ENTITY_FIELD_SPECS.map((field) => field.domain));
+    all.forEach((entityId) => {
+      const [domain, objectIdRaw] = entityId.split(".");
+      const objectId = normalizeToken(objectIdRaw);
+      if (!domain || !objectId || !eligibleDomains.has(domain)) {
+        return;
+      }
+      for (const token of this._candidatePrefixTokens(objectId)) {
+        const bucket = weighted.get(token) ?? { count: 0, domains: /* @__PURE__ */ new Set() };
+        bucket.count += 1;
+        bucket.domains.add(domain);
+        weighted.set(token, bucket);
+      }
+    });
+    const ranked = [...weighted.entries()].filter(([, value]) => value.count >= 3 && value.domains.size >= 2).sort((a3, b3) => {
+      const scoreDiff = b3[1].count - a3[1].count;
+      if (scoreDiff !== 0) {
+        return scoreDiff;
+      }
+      return b3[0].length - a3[0].length;
+    }).map(([token]) => token);
+    const selected = normalizeToken(this._config.charger_name);
+    if (selected && !ranked.includes(selected)) {
+      ranked.unshift(selected);
+    }
+    return ranked.slice(0, 20);
   }
   _entityOptions(field) {
     if (!this.hass) {
@@ -1474,8 +1504,8 @@ var TuyaEvChargerCardEditor = class extends i4 {
     );
     const source = (matchingSuffix.length ? matchingSuffix : all).slice();
     source.sort((a3, b3) => {
-      const aScore = token && a3.includes(token) ? 0 : 1;
-      const bScore = token && b3.includes(token) ? 0 : 1;
+      const aScore = this._tokenScore(a3, token);
+      const bScore = this._tokenScore(b3, token);
       if (aScore !== bScore) {
         return aScore - bScore;
       }
@@ -1513,18 +1543,48 @@ var TuyaEvChargerCardEditor = class extends i4 {
     const matches = all.filter(
       (entityId) => this._matchesSuffix(entityId, field.suffixes)
     );
-    if (!matches.length) {
+    const tokenMatches = token ? all.filter((entityId) => this._tokenScore(entityId, token) <= 1) : [];
+    const source = matches.length ? matches : tokenMatches;
+    if (!source.length) {
       return void 0;
     }
     if (!token) {
-      return matches[0];
+      return source[0];
     }
-    return matches.find((entityId) => entityId.includes(token)) ?? matches[0];
+    return source.sort((a3, b3) => this._tokenScore(a3, token) - this._tokenScore(b3, token))[0];
   }
   _matchesSuffix(entityId, suffixes) {
     return suffixes.some(
       (suffix) => entityId.endsWith(`_${suffix}`) || entityId.endsWith(suffix)
     );
+  }
+  _candidatePrefixTokens(objectId) {
+    const normalized = normalizeToken(objectId);
+    const parts = normalized.split("_").filter(Boolean);
+    const tokens = [];
+    for (let index = 1; index < parts.length; index += 1) {
+      const token = parts.slice(0, index).join("_");
+      if (token.length >= 3) {
+        tokens.push(token);
+      }
+    }
+    return tokens;
+  }
+  _tokenScore(entityId, token) {
+    if (!token) {
+      return 2;
+    }
+    const objectId = normalizeToken(entityId.split(".")[1] ?? "");
+    if (!objectId) {
+      return 3;
+    }
+    if (objectId === token || objectId.startsWith(`${token}_`)) {
+      return 0;
+    }
+    if (objectId.includes(token)) {
+      return 1;
+    }
+    return 2;
   }
   _extractToken(entityId, suffixes) {
     const objectId = entityId.split(".")[1] ?? "";

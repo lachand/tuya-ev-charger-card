@@ -1089,19 +1089,56 @@ class TuyaEvChargerCardEditor extends LitElement {
     if (!this.hass) {
       return [];
     }
-    const tokens = new Set<string>();
+    const weighted = new Map<string, { count: number; domains: Set<string> }>();
+    const all = Object.keys(this.hass.states).sort();
+
+    // Pass 1: best-case extraction using known entity suffixes.
     for (const field of ENTITY_FIELD_SPECS) {
       const prefix = `${field.domain}.`;
-      Object.keys(this.hass.states)
-        .filter((entityId) => entityId.startsWith(prefix))
-        .forEach((entityId) => {
-          const token = this._extractToken(entityId, field.suffixes);
-          if (token) {
-            tokens.add(token);
-          }
-        });
+      all.filter((entityId) => entityId.startsWith(prefix)).forEach((entityId) => {
+        const token = this._extractToken(entityId, field.suffixes);
+        if (!token) {
+          return;
+        }
+        const bucket = weighted.get(token) ?? { count: 0, domains: new Set<string>() };
+        bucket.count += 4;
+        bucket.domains.add(field.domain);
+        weighted.set(token, bucket);
+      });
     }
-    return [...tokens].sort((a, b) => a.localeCompare(b));
+
+    // Pass 2: fallback extraction from common object_id prefixes.
+    const eligibleDomains = new Set(ENTITY_FIELD_SPECS.map((field) => field.domain));
+    all.forEach((entityId) => {
+      const [domain, objectIdRaw] = entityId.split(".");
+      const objectId = normalizeToken(objectIdRaw);
+      if (!domain || !objectId || !eligibleDomains.has(domain)) {
+        return;
+      }
+      for (const token of this._candidatePrefixTokens(objectId)) {
+        const bucket = weighted.get(token) ?? { count: 0, domains: new Set<string>() };
+        bucket.count += 1;
+        bucket.domains.add(domain);
+        weighted.set(token, bucket);
+      }
+    });
+
+    const ranked = [...weighted.entries()]
+      .filter(([, value]) => value.count >= 3 && value.domains.size >= 2)
+      .sort((a, b) => {
+        const scoreDiff = b[1].count - a[1].count;
+        if (scoreDiff !== 0) {
+          return scoreDiff;
+        }
+        return b[0].length - a[0].length;
+      })
+      .map(([token]) => token);
+
+    const selected = normalizeToken(this._config.charger_name);
+    if (selected && !ranked.includes(selected)) {
+      ranked.unshift(selected);
+    }
+    return ranked.slice(0, 20);
   }
 
   private _entityOptions(field: EntityFieldSpec): string[] {
@@ -1118,8 +1155,8 @@ class TuyaEvChargerCardEditor extends LitElement {
     );
     const source = (matchingSuffix.length ? matchingSuffix : all).slice();
     source.sort((a, b) => {
-      const aScore = token && a.includes(token) ? 0 : 1;
-      const bScore = token && b.includes(token) ? 0 : 1;
+      const aScore = this._tokenScore(a, token);
+      const bScore = this._tokenScore(b, token);
       if (aScore !== bScore) {
         return aScore - bScore;
       }
@@ -1163,19 +1200,53 @@ class TuyaEvChargerCardEditor extends LitElement {
     const matches = all.filter((entityId) =>
       this._matchesSuffix(entityId, field.suffixes)
     );
-    if (!matches.length) {
+    const tokenMatches = token
+      ? all.filter((entityId) => this._tokenScore(entityId, token) <= 1)
+      : [];
+    const source = matches.length ? matches : tokenMatches;
+    if (!source.length) {
       return undefined;
     }
     if (!token) {
-      return matches[0];
+      return source[0];
     }
-    return matches.find((entityId) => entityId.includes(token)) ?? matches[0];
+    return source.sort((a, b) => this._tokenScore(a, token) - this._tokenScore(b, token))[0];
   }
 
   private _matchesSuffix(entityId: string, suffixes: string[]): boolean {
     return suffixes.some(
       (suffix) => entityId.endsWith(`_${suffix}`) || entityId.endsWith(suffix)
     );
+  }
+
+  private _candidatePrefixTokens(objectId: string): string[] {
+    const normalized = normalizeToken(objectId);
+    const parts = normalized.split("_").filter(Boolean);
+    const tokens: string[] = [];
+    for (let index = 1; index < parts.length; index += 1) {
+      const token = parts.slice(0, index).join("_");
+      if (token.length >= 3) {
+        tokens.push(token);
+      }
+    }
+    return tokens;
+  }
+
+  private _tokenScore(entityId: string, token: string): number {
+    if (!token) {
+      return 2;
+    }
+    const objectId = normalizeToken(entityId.split(".")[1] ?? "");
+    if (!objectId) {
+      return 3;
+    }
+    if (objectId === token || objectId.startsWith(`${token}_`)) {
+      return 0;
+    }
+    if (objectId.includes(token)) {
+      return 1;
+    }
+    return 2;
   }
 
   private _extractToken(
