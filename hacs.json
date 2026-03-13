@@ -1,6 +1,6 @@
 {
   "name": "Tuya EV Charger Card",
   "content_in_root": true,
-  "filename": "dist/tuya-ev-charger-card.js",
+  "filename": "tuya-ev-charger-card.js",
   "render_readme": true
 }

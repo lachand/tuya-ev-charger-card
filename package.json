@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "esbuild src/tuya-ev-charger-card.ts --bundle --format=esm --target=es2020 --outfile=dist/tuya-ev-charger-card.js",
-    "watch": "esbuild src/tuya-ev-charger-card.ts --bundle --format=esm --target=es2020 --outfile=dist/tuya-ev-charger-card.js --watch"
+    "build": "mkdir -p dist && esbuild src/tuya-ev-charger-card.ts --bundle --format=esm --target=es2020 --outfile=tuya-ev-charger-card.js && cp tuya-ev-charger-card.js dist/tuya-ev-charger-card.js",
+    "watch": "esbuild src/tuya-ev-charger-card.ts --bundle --format=esm --target=es2020 --outfile=tuya-ev-charger-card.js --watch"
   },
   "dependencies": {
     "lit": "^3.2.1"

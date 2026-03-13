@@ -16,7 +16,7 @@ Modern and sober UI with:
 
 1. Add this repository as a custom `Frontend` repository in HACS.
 2. Install `Tuya EV Charger Card`.
-3. Add `/hacsfiles/tuya-ev-charger-card/dist/tuya-ev-charger-card.js` as a dashboard resource if needed.
+3. Add `/hacsfiles/tuya-ev-charger-card/tuya-ev-charger-card.js` as a dashboard resource if needed.
 
 ## Card example
 
@@ -38,4 +38,6 @@ npm install
 npm run build
 ```
 
-Output bundle: `dist/tuya-ev-charger-card.js`
+Build outputs:
+- `tuya-ev-charger-card.js` (primary HACS bundle)
+- `dist/tuya-ev-charger-card.js` (compatibility copy)
