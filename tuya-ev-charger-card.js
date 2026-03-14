@@ -610,6 +610,7 @@ var TuyaEvChargerCard = class extends i4 {
     );
     const chargeCurrentEntity = this._entity(this._resolvedEntities.chargeCurrent);
     const chargeCurrentSetpoint = this._numberState(this._resolvedEntities.chargeCurrent);
+    const allowedCurrents = this._allowedCurrents(chargeCurrentEntity);
     const currentMin = this._attrNumber(chargeCurrentEntity, "min") ?? this._attrNumber(chargeCurrentEntity, "native_min_value") ?? 6;
     const currentMax = this._attrNumber(chargeCurrentEntity, "max") ?? this._attrNumber(chargeCurrentEntity, "native_max_value") ?? 16;
     const currentStep = this._attrNumber(chargeCurrentEntity, "step") ?? this._attrNumber(chargeCurrentEntity, "native_step") ?? 1;
@@ -662,11 +663,17 @@ var TuyaEvChargerCard = class extends i4 {
           <div class="current-box">
             <button
               class="btn tiny"
-              @click=${() => this._setChargeCurrent(
-      (chargeCurrentSetpoint ?? currentMin) - currentStep,
-      currentMin,
-      currentMax
-    )}
+              @click=${() => {
+      const target = this._stepChargeCurrent(
+        -1,
+        chargeCurrentSetpoint,
+        allowedCurrents,
+        currentMin,
+        currentMax,
+        currentStep
+      );
+      this._setChargeCurrent(target, currentMin, currentMax, allowedCurrents);
+    }}
               ?disabled=${!this._resolvedEntities.chargeCurrent}
             >
               -
@@ -674,11 +681,17 @@ var TuyaEvChargerCard = class extends i4 {
             <div class="current-value">${this._formatAmp(chargeCurrentSetpoint)}</div>
             <button
               class="btn tiny"
-              @click=${() => this._setChargeCurrent(
-      (chargeCurrentSetpoint ?? currentMin) + currentStep,
-      currentMin,
-      currentMax
-    )}
+              @click=${() => {
+      const target = this._stepChargeCurrent(
+        1,
+        chargeCurrentSetpoint,
+        allowedCurrents,
+        currentMin,
+        currentMax,
+        currentStep
+      );
+      this._setChargeCurrent(target, currentMin, currentMax, allowedCurrents);
+    }}
               ?disabled=${!this._resolvedEntities.chargeCurrent}
             >
               +
@@ -985,6 +998,37 @@ var TuyaEvChargerCard = class extends i4 {
     const parsed = Number(raw);
     return Number.isFinite(parsed) ? parsed : null;
   }
+  _allowedCurrents(entity) {
+    if (!entity) {
+      return [];
+    }
+    const rawValues = [
+      entity.attributes.allowed_currents,
+      entity.attributes.available_currents,
+      entity.attributes.adjust_current_options
+    ];
+    const parsed = [];
+    for (const raw of rawValues) {
+      if (Array.isArray(raw)) {
+        for (const value of raw) {
+          const numberValue = Number(value);
+          if (Number.isFinite(numberValue)) {
+            parsed.push(Math.round(numberValue));
+          }
+        }
+        continue;
+      }
+      if (typeof raw === "string") {
+        for (const chunk of raw.split(",")) {
+          const numberValue = Number(chunk.trim());
+          if (Number.isFinite(numberValue)) {
+            parsed.push(Math.round(numberValue));
+          }
+        }
+      }
+    }
+    return [...new Set(parsed)].filter((value) => value > 0).sort((a3, b3) => a3 - b3);
+  }
   _formatPower(valueW) {
     if (valueW === null) {
       return "--";
@@ -1026,16 +1070,44 @@ var TuyaEvChargerCard = class extends i4 {
       option
     });
   }
-  async _setChargeCurrent(value, minimum, maximum) {
+  async _setChargeCurrent(value, minimum, maximum, allowedCurrents = []) {
     if (!this.hass || !this._resolvedEntities.chargeCurrent) {
       return;
     }
     const rounded = Math.round(value);
     const clamped = Math.max(minimum, Math.min(maximum, rounded));
+    const allowed = allowedCurrents.filter(
+      (candidate) => candidate >= minimum && candidate <= maximum
+    );
+    const target = allowed.length > 0 ? allowed.reduce(
+      (best, candidate) => Math.abs(candidate - clamped) < Math.abs(best - clamped) ? candidate : best
+    ) : clamped;
     await this.hass.callService("number", "set_value", {
       entity_id: this._resolvedEntities.chargeCurrent,
-      value: clamped
+      value: target
     });
+  }
+  _stepChargeCurrent(direction, currentValue, allowedCurrents, minimum, maximum, step) {
+    const allowed = allowedCurrents.filter((candidate) => candidate >= minimum && candidate <= maximum).sort((a3, b3) => a3 - b3);
+    if (allowed.length > 0) {
+      const current = currentValue ?? allowed[0];
+      if (direction < 0) {
+        for (let index = allowed.length - 1; index >= 0; index -= 1) {
+          if (allowed[index] < current) {
+            return allowed[index];
+          }
+        }
+        return allowed[0];
+      }
+      for (const candidate of allowed) {
+        if (candidate > current) {
+          return candidate;
+        }
+      }
+      return allowed[allowed.length - 1];
+    }
+    const base = currentValue ?? minimum;
+    return base + direction * step;
   }
 };
 TuyaEvChargerCard.properties = {

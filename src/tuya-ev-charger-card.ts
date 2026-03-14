@@ -131,6 +131,7 @@ class TuyaEvChargerCard extends LitElement {
 
     const chargeCurrentEntity = this._entity(this._resolvedEntities.chargeCurrent);
     const chargeCurrentSetpoint = this._numberState(this._resolvedEntities.chargeCurrent);
+    const allowedCurrents = this._allowedCurrents(chargeCurrentEntity);
     const currentMin =
       this._attrNumber(chargeCurrentEntity, "min") ??
       this._attrNumber(chargeCurrentEntity, "native_min_value") ??
@@ -193,12 +194,17 @@ class TuyaEvChargerCard extends LitElement {
           <div class="current-box">
             <button
               class="btn tiny"
-              @click=${() =>
-                this._setChargeCurrent(
-                  (chargeCurrentSetpoint ?? currentMin) - currentStep,
+              @click=${() => {
+                const target = this._stepChargeCurrent(
+                  -1,
+                  chargeCurrentSetpoint,
+                  allowedCurrents,
                   currentMin,
-                  currentMax
-                )}
+                  currentMax,
+                  currentStep
+                );
+                this._setChargeCurrent(target, currentMin, currentMax, allowedCurrents);
+              }}
               ?disabled=${!this._resolvedEntities.chargeCurrent}
             >
               -
@@ -206,12 +212,17 @@ class TuyaEvChargerCard extends LitElement {
             <div class="current-value">${this._formatAmp(chargeCurrentSetpoint)}</div>
             <button
               class="btn tiny"
-              @click=${() =>
-                this._setChargeCurrent(
-                  (chargeCurrentSetpoint ?? currentMin) + currentStep,
+              @click=${() => {
+                const target = this._stepChargeCurrent(
+                  1,
+                  chargeCurrentSetpoint,
+                  allowedCurrents,
                   currentMin,
-                  currentMax
-                )}
+                  currentMax,
+                  currentStep
+                );
+                this._setChargeCurrent(target, currentMin, currentMax, allowedCurrents);
+              }}
               ?disabled=${!this._resolvedEntities.chargeCurrent}
             >
               +
@@ -595,6 +606,41 @@ class TuyaEvChargerCard extends LitElement {
     return Number.isFinite(parsed) ? parsed : null;
   }
 
+  private _allowedCurrents(entity: HassEntity | undefined): number[] {
+    if (!entity) {
+      return [];
+    }
+
+    const rawValues = [
+      entity.attributes.allowed_currents,
+      entity.attributes.available_currents,
+      entity.attributes.adjust_current_options,
+    ];
+
+    const parsed: number[] = [];
+    for (const raw of rawValues) {
+      if (Array.isArray(raw)) {
+        for (const value of raw) {
+          const numberValue = Number(value);
+          if (Number.isFinite(numberValue)) {
+            parsed.push(Math.round(numberValue));
+          }
+        }
+        continue;
+      }
+      if (typeof raw === "string") {
+        for (const chunk of raw.split(",")) {
+          const numberValue = Number(chunk.trim());
+          if (Number.isFinite(numberValue)) {
+            parsed.push(Math.round(numberValue));
+          }
+        }
+      }
+    }
+
+    return [...new Set(parsed)].filter((value) => value > 0).sort((a, b) => a - b);
+  }
+
   private _formatPower(valueW: number | null): string {
     if (valueW === null) {
       return "--";
@@ -644,17 +690,61 @@ class TuyaEvChargerCard extends LitElement {
   private async _setChargeCurrent(
     value: number,
     minimum: number,
-    maximum: number
+    maximum: number,
+    allowedCurrents: number[] = []
   ) {
     if (!this.hass || !this._resolvedEntities.chargeCurrent) {
       return;
     }
     const rounded = Math.round(value);
     const clamped = Math.max(minimum, Math.min(maximum, rounded));
+    const allowed = allowedCurrents.filter(
+      (candidate) => candidate >= minimum && candidate <= maximum
+    );
+    const target =
+      allowed.length > 0
+        ? allowed.reduce((best, candidate) =>
+            Math.abs(candidate - clamped) < Math.abs(best - clamped) ? candidate : best
+          )
+        : clamped;
     await this.hass.callService("number", "set_value", {
       entity_id: this._resolvedEntities.chargeCurrent,
-      value: clamped,
+      value: target,
     });
+  }
+
+  private _stepChargeCurrent(
+    direction: -1 | 1,
+    currentValue: number | null,
+    allowedCurrents: number[],
+    minimum: number,
+    maximum: number,
+    step: number
+  ): number {
+    const allowed = allowedCurrents
+      .filter((candidate) => candidate >= minimum && candidate <= maximum)
+      .sort((a, b) => a - b);
+    if (allowed.length > 0) {
+      const current = currentValue ?? allowed[0];
+      if (direction < 0) {
+        for (let index = allowed.length - 1; index >= 0; index -= 1) {
+          if (allowed[index] < current) {
+            return allowed[index];
+          }
+        }
+        return allowed[0];
+      }
+
+      for (const candidate of allowed) {
+        if (candidate > current) {
+          return candidate;
+        }
+      }
+      return allowed[allowed.length - 1];
+    }
+
+    const base = currentValue ?? minimum;
+    return base + direction * step;
   }
 
   private _toggleDetails = () => {
