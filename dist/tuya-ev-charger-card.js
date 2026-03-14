@@ -557,6 +557,7 @@ var ATTR_CHARGER_TOKEN = "tuya_ev_charger_token";
 var GRAPH_SAMPLE_INTERVAL_MS = 3e4;
 var GRAPH_WINDOW_MS = 36e5;
 var GRAPH_MAX_POINTS = GRAPH_WINDOW_MS / GRAPH_SAMPLE_INTERVAL_MS;
+var OPTIMISTIC_TIMEOUT_MS = 12e3;
 var TuyaEvChargerCard = class extends i4 {
   constructor() {
     super(...arguments);
@@ -565,6 +566,8 @@ var TuyaEvChargerCard = class extends i4 {
     this._graphHistory = [];
     this._resolvedEntities = {};
     this._lastRenderSignature = "";
+    this._optimisticStates = {};
+    this._optimisticTimeouts = /* @__PURE__ */ new Map();
     this._toggleDetails = () => {
       this._detailsOpen = !this._detailsOpen;
     };
@@ -587,13 +590,19 @@ var TuyaEvChargerCard = class extends i4 {
     }
     this._config = config;
     this._resolvedEntities = this._resolveConfiguredEntities(config);
+    this._clearAllOptimisticStates();
     this._lastRenderSignature = "";
   }
+  disconnectedCallback() {
+    this._clearAllOptimisticStates();
+    super.disconnectedCallback();
+  }
   shouldUpdate(changed) {
-    if (changed.has("_config") || changed.has("_resolvedEntities") || changed.has("_detailsOpen") || changed.has("_debugOpen") || changed.has("_graphHistory")) {
+    if (changed.has("_config") || changed.has("_resolvedEntities") || changed.has("_detailsOpen") || changed.has("_debugOpen") || changed.has("_graphHistory") || changed.has("_optimisticStates")) {
       return true;
     }
     if (changed.has("hass")) {
+      this._syncOptimisticStatesWithHass();
       const graphChanged = this._appendGraphSample();
       const nextSignature = this._stateSignature();
       const stateChanged = nextSignature !== this._lastRenderSignature;
@@ -883,6 +892,73 @@ var TuyaEvChargerCard = class extends i4 {
     ];
     return [...new Set(all.filter((value) => Boolean(value)))];
   }
+  _syncOptimisticStatesWithHass() {
+    if (!this.hass) {
+      return;
+    }
+    const entries = Object.entries(this._optimisticStates);
+    if (!entries.length) {
+      return;
+    }
+    let changed = false;
+    const next = { ...this._optimisticStates };
+    for (const [entityId, optimisticState] of entries) {
+      const realState = this.hass.states[entityId]?.state;
+      if (realState === void 0 || realState === optimisticState) {
+        delete next[entityId];
+        const timeout = this._optimisticTimeouts.get(entityId);
+        if (timeout) {
+          clearTimeout(timeout);
+          this._optimisticTimeouts.delete(entityId);
+        }
+        changed = true;
+      }
+    }
+    if (changed) {
+      this._optimisticStates = next;
+    }
+  }
+  _setOptimisticState(entityId, state) {
+    if (!entityId) {
+      return;
+    }
+    const previous = this._optimisticTimeouts.get(entityId);
+    if (previous) {
+      clearTimeout(previous);
+    }
+    this._optimisticStates = {
+      ...this._optimisticStates,
+      [entityId]: state
+    };
+    const timeout = setTimeout(
+      () => this._clearOptimisticState(entityId),
+      OPTIMISTIC_TIMEOUT_MS
+    );
+    this._optimisticTimeouts.set(entityId, timeout);
+  }
+  _clearOptimisticState(entityId) {
+    if (!entityId || !(entityId in this._optimisticStates)) {
+      return;
+    }
+    const next = { ...this._optimisticStates };
+    delete next[entityId];
+    this._optimisticStates = next;
+    const timeout = this._optimisticTimeouts.get(entityId);
+    if (timeout) {
+      clearTimeout(timeout);
+      this._optimisticTimeouts.delete(entityId);
+    }
+  }
+  _clearAllOptimisticStates() {
+    if (!Object.keys(this._optimisticStates).length && this._optimisticTimeouts.size === 0) {
+      return;
+    }
+    for (const timeout of this._optimisticTimeouts.values()) {
+      clearTimeout(timeout);
+    }
+    this._optimisticTimeouts.clear();
+    this._optimisticStates = {};
+  }
   _normalizeToken(input) {
     return String(input ?? "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "_");
   }
@@ -930,6 +1006,13 @@ var TuyaEvChargerCard = class extends i4 {
     return this.hass.states[entityId];
   }
   _state(entityId) {
+    if (!entityId) {
+      return void 0;
+    }
+    const optimisticState = this._optimisticStates[entityId];
+    if (optimisticState !== void 0) {
+      return optimisticState;
+    }
     return this._entity(entityId)?.state;
   }
   _isOn(entityId) {
@@ -1020,25 +1103,43 @@ var TuyaEvChargerCard = class extends i4 {
       return;
     }
     const entityId = this._resolvedEntities.chargeSession;
-    const service = this._isOn(entityId) ? "turn_off" : "turn_on";
-    await this.hass.callService("switch", service, { entity_id: entityId });
+    const nextState = this._isOn(entityId) ? "off" : "on";
+    const service = nextState === "on" ? "turn_on" : "turn_off";
+    this._setOptimisticState(entityId, nextState);
+    try {
+      await this.hass.callService("switch", service, { entity_id: entityId });
+    } catch {
+      this._clearOptimisticState(entityId);
+    }
   }
   async _onSurplusModeToggle() {
     if (!this.hass || !this._resolvedEntities.surplusMode) {
       return;
     }
     const entityId = this._resolvedEntities.surplusMode;
-    const service = this._isOn(entityId) ? "turn_off" : "turn_on";
-    await this.hass.callService("switch", service, { entity_id: entityId });
+    const nextState = this._isOn(entityId) ? "off" : "on";
+    const service = nextState === "on" ? "turn_on" : "turn_off";
+    this._setOptimisticState(entityId, nextState);
+    try {
+      await this.hass.callService("switch", service, { entity_id: entityId });
+    } catch {
+      this._clearOptimisticState(entityId);
+    }
   }
   async _setProfile(option) {
     if (!this.hass || !this._resolvedEntities.surplusProfile) {
       return;
     }
-    await this.hass.callService("select", "select_option", {
-      entity_id: this._resolvedEntities.surplusProfile,
-      option
-    });
+    const entityId = this._resolvedEntities.surplusProfile;
+    this._setOptimisticState(entityId, option);
+    try {
+      await this.hass.callService("select", "select_option", {
+        entity_id: entityId,
+        option
+      });
+    } catch {
+      this._clearOptimisticState(entityId);
+    }
   }
   async _setChargeCurrent(value, minimum, maximum, allowedCurrents = []) {
     if (!this.hass || !this._resolvedEntities.chargeCurrent) {
@@ -1052,10 +1153,16 @@ var TuyaEvChargerCard = class extends i4 {
     const target = allowed.length > 0 ? allowed.reduce(
       (best, candidate) => Math.abs(candidate - clamped) < Math.abs(best - clamped) ? candidate : best
     ) : clamped;
-    await this.hass.callService("number", "set_value", {
-      entity_id: this._resolvedEntities.chargeCurrent,
-      value: target
-    });
+    const entityId = this._resolvedEntities.chargeCurrent;
+    this._setOptimisticState(entityId, String(target));
+    try {
+      await this.hass.callService("number", "set_value", {
+        entity_id: entityId,
+        value: target
+      });
+    } catch {
+      this._clearOptimisticState(entityId);
+    }
   }
   _stepChargeCurrent(direction, currentValue, allowedCurrents, minimum, maximum, step) {
     const allowed = allowedCurrents.filter((candidate) => candidate >= minimum && candidate <= maximum).sort((a3, b3) => a3 - b3);
@@ -1086,7 +1193,8 @@ TuyaEvChargerCard.properties = {
   _detailsOpen: { state: true },
   _debugOpen: { state: true },
   _graphHistory: { state: true },
-  _resolvedEntities: { state: true }
+  _resolvedEntities: { state: true },
+  _optimisticStates: { state: true }
 };
 TuyaEvChargerCard.styles = i`
     :host {

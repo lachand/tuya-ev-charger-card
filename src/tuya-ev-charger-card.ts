@@ -64,6 +64,7 @@ const ATTR_CHARGER_TOKEN = "tuya_ev_charger_token";
 const GRAPH_SAMPLE_INTERVAL_MS = 30_000;
 const GRAPH_WINDOW_MS = 3_600_000;
 const GRAPH_MAX_POINTS = GRAPH_WINDOW_MS / GRAPH_SAMPLE_INTERVAL_MS;
+const OPTIMISTIC_TIMEOUT_MS = 12_000;
 
 class TuyaEvChargerCard extends LitElement {
   public hass?: HomeAssistant;
@@ -74,6 +75,8 @@ class TuyaEvChargerCard extends LitElement {
   private _graphHistory: GraphSample[] = [];
   private _resolvedEntities: ResolvedEntities = {};
   private _lastRenderSignature = "";
+  private _optimisticStates: Record<string, string> = {};
+  private _optimisticTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
   static properties = {
     hass: { attribute: false },
@@ -82,6 +85,7 @@ class TuyaEvChargerCard extends LitElement {
     _debugOpen: { state: true },
     _graphHistory: { state: true },
     _resolvedEntities: { state: true },
+    _optimisticStates: { state: true },
   };
 
   public static getStubConfig(): CardConfig {
@@ -101,7 +105,13 @@ class TuyaEvChargerCard extends LitElement {
     }
     this._config = config;
     this._resolvedEntities = this._resolveConfiguredEntities(config);
+    this._clearAllOptimisticStates();
     this._lastRenderSignature = "";
+  }
+
+  public disconnectedCallback(): void {
+    this._clearAllOptimisticStates();
+    super.disconnectedCallback();
   }
 
   protected shouldUpdate(changed: Map<string, unknown>): boolean {
@@ -110,12 +120,14 @@ class TuyaEvChargerCard extends LitElement {
       changed.has("_resolvedEntities") ||
       changed.has("_detailsOpen") ||
       changed.has("_debugOpen") ||
-      changed.has("_graphHistory")
+      changed.has("_graphHistory") ||
+      changed.has("_optimisticStates")
     ) {
       return true;
     }
 
     if (changed.has("hass")) {
+      this._syncOptimisticStatesWithHass();
       const graphChanged = this._appendGraphSample();
       const nextSignature = this._stateSignature();
       const stateChanged = nextSignature !== this._lastRenderSignature;
@@ -454,6 +466,79 @@ class TuyaEvChargerCard extends LitElement {
     return [...new Set(all.filter((value): value is string => Boolean(value)))];
   }
 
+  private _syncOptimisticStatesWithHass(): void {
+    if (!this.hass) {
+      return;
+    }
+    const entries = Object.entries(this._optimisticStates);
+    if (!entries.length) {
+      return;
+    }
+
+    let changed = false;
+    const next: Record<string, string> = { ...this._optimisticStates };
+    for (const [entityId, optimisticState] of entries) {
+      const realState = this.hass.states[entityId]?.state;
+      if (realState === undefined || realState === optimisticState) {
+        delete next[entityId];
+        const timeout = this._optimisticTimeouts.get(entityId);
+        if (timeout) {
+          clearTimeout(timeout);
+          this._optimisticTimeouts.delete(entityId);
+        }
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      this._optimisticStates = next;
+    }
+  }
+
+  private _setOptimisticState(entityId: string | undefined, state: string): void {
+    if (!entityId) {
+      return;
+    }
+    const previous = this._optimisticTimeouts.get(entityId);
+    if (previous) {
+      clearTimeout(previous);
+    }
+    this._optimisticStates = {
+      ...this._optimisticStates,
+      [entityId]: state,
+    };
+    const timeout = setTimeout(
+      () => this._clearOptimisticState(entityId),
+      OPTIMISTIC_TIMEOUT_MS
+    );
+    this._optimisticTimeouts.set(entityId, timeout);
+  }
+
+  private _clearOptimisticState(entityId: string | undefined): void {
+    if (!entityId || !(entityId in this._optimisticStates)) {
+      return;
+    }
+    const next = { ...this._optimisticStates };
+    delete next[entityId];
+    this._optimisticStates = next;
+    const timeout = this._optimisticTimeouts.get(entityId);
+    if (timeout) {
+      clearTimeout(timeout);
+      this._optimisticTimeouts.delete(entityId);
+    }
+  }
+
+  private _clearAllOptimisticStates(): void {
+    if (!Object.keys(this._optimisticStates).length && this._optimisticTimeouts.size === 0) {
+      return;
+    }
+    for (const timeout of this._optimisticTimeouts.values()) {
+      clearTimeout(timeout);
+    }
+    this._optimisticTimeouts.clear();
+    this._optimisticStates = {};
+  }
+
   private _normalizeToken(input?: string): string {
     return String(input ?? "")
       .trim()
@@ -523,6 +608,13 @@ class TuyaEvChargerCard extends LitElement {
   }
 
   private _state(entityId?: string): string | undefined {
+    if (!entityId) {
+      return undefined;
+    }
+    const optimisticState = this._optimisticStates[entityId];
+    if (optimisticState !== undefined) {
+      return optimisticState;
+    }
     return this._entity(entityId)?.state;
   }
 
@@ -626,8 +718,14 @@ class TuyaEvChargerCard extends LitElement {
       return;
     }
     const entityId = this._resolvedEntities.chargeSession;
-    const service = this._isOn(entityId) ? "turn_off" : "turn_on";
-    await this.hass.callService("switch", service, { entity_id: entityId });
+    const nextState = this._isOn(entityId) ? "off" : "on";
+    const service = nextState === "on" ? "turn_on" : "turn_off";
+    this._setOptimisticState(entityId, nextState);
+    try {
+      await this.hass.callService("switch", service, { entity_id: entityId });
+    } catch {
+      this._clearOptimisticState(entityId);
+    }
   }
 
   private async _onSurplusModeToggle() {
@@ -635,18 +733,30 @@ class TuyaEvChargerCard extends LitElement {
       return;
     }
     const entityId = this._resolvedEntities.surplusMode;
-    const service = this._isOn(entityId) ? "turn_off" : "turn_on";
-    await this.hass.callService("switch", service, { entity_id: entityId });
+    const nextState = this._isOn(entityId) ? "off" : "on";
+    const service = nextState === "on" ? "turn_on" : "turn_off";
+    this._setOptimisticState(entityId, nextState);
+    try {
+      await this.hass.callService("switch", service, { entity_id: entityId });
+    } catch {
+      this._clearOptimisticState(entityId);
+    }
   }
 
   private async _setProfile(option: string) {
     if (!this.hass || !this._resolvedEntities.surplusProfile) {
       return;
     }
-    await this.hass.callService("select", "select_option", {
-      entity_id: this._resolvedEntities.surplusProfile,
-      option,
-    });
+    const entityId = this._resolvedEntities.surplusProfile;
+    this._setOptimisticState(entityId, option);
+    try {
+      await this.hass.callService("select", "select_option", {
+        entity_id: entityId,
+        option,
+      });
+    } catch {
+      this._clearOptimisticState(entityId);
+    }
   }
 
   private async _setChargeCurrent(
@@ -669,10 +779,16 @@ class TuyaEvChargerCard extends LitElement {
             Math.abs(candidate - clamped) < Math.abs(best - clamped) ? candidate : best
           )
         : clamped;
-    await this.hass.callService("number", "set_value", {
-      entity_id: this._resolvedEntities.chargeCurrent,
-      value: target,
-    });
+    const entityId = this._resolvedEntities.chargeCurrent;
+    this._setOptimisticState(entityId, String(target));
+    try {
+      await this.hass.callService("number", "set_value", {
+        entity_id: entityId,
+        value: target,
+      });
+    } catch {
+      this._clearOptimisticState(entityId);
+    }
   }
 
   private _stepChargeCurrent(
