@@ -554,6 +554,9 @@ var PROFILE_OPTIONS = ["eco", "balanced", "fast"];
 var ATTR_CARD_ROLE = "tuya_ev_charger_card_role";
 var ATTR_CARD_INDEX = "tuya_ev_charger_card_index";
 var ATTR_CHARGER_TOKEN = "tuya_ev_charger_token";
+var GRAPH_SAMPLE_INTERVAL_MS = 3e4;
+var GRAPH_WINDOW_MS = 36e5;
+var GRAPH_MAX_POINTS = GRAPH_WINDOW_MS / GRAPH_SAMPLE_INTERVAL_MS;
 var TuyaEvChargerCard = class extends i4 {
   constructor() {
     super(...arguments);
@@ -561,6 +564,7 @@ var TuyaEvChargerCard = class extends i4 {
     this._debugOpen = false;
     this._graphHistory = [];
     this._resolvedEntities = {};
+    this._lastRenderSignature = "";
     this._toggleDetails = () => {
       this._detailsOpen = !this._detailsOpen;
     };
@@ -582,13 +586,23 @@ var TuyaEvChargerCard = class extends i4 {
       throw new Error("Invalid card configuration.");
     }
     this._config = config;
+    this._resolvedEntities = this._resolveConfiguredEntities(config);
+    this._lastRenderSignature = "";
   }
   shouldUpdate(changed) {
-    if (changed.has("hass")) {
-      this._resolveEntities();
-      this._appendGraphSample();
+    if (changed.has("_config") || changed.has("_resolvedEntities") || changed.has("_detailsOpen") || changed.has("_debugOpen") || changed.has("_graphHistory")) {
+      return true;
     }
-    return true;
+    if (changed.has("hass")) {
+      const graphChanged = this._appendGraphSample();
+      const nextSignature = this._stateSignature();
+      const stateChanged = nextSignature !== this._lastRenderSignature;
+      if (stateChanged) {
+        this._lastRenderSignature = nextSignature;
+      }
+      return graphChanged || stateChanged;
+    }
+    return false;
   }
   render() {
     if (!this._config || !this.hass) {
@@ -805,133 +819,89 @@ var TuyaEvChargerCard = class extends i4 {
   _debugValue(label, value) {
     return b2`<div class="debug-item"><span>${label}</span><strong>${value}</strong></div>`;
   }
-  _resolveEntities() {
-    if (!this._config || !this.hass) {
-      return;
-    }
-    const token = this._normalizeToken(this._config.charger_name);
-    const cfg = this._config.entities ?? {};
-    this._resolvedEntities = {
-      power: cfg.power ?? this._findEntity("sensor", ["power_l1"], token, "power"),
-      current: cfg.current ?? this._findEntity("sensor", ["current_l1"], token, "current"),
-      chargeCurrent: cfg.charge_current ?? this._findEntity("number", ["charge_current"], token, "charge_current"),
-      chargeSession: cfg.charge_session ?? this._findEntity("switch", ["charge_session"], token, "charge_session"),
-      surplusMode: cfg.surplus_mode ?? this._findEntity("switch", ["surplus_mode"], token, "surplus_mode"),
-      surplusProfile: cfg.surplus_profile ?? this._findEntity("select", ["surplus_profile"], token, "surplus_profile"),
-      regulationActive: cfg.regulation_active ?? this._findEntity(
-        "binary_sensor",
-        ["surplus_regulation_active"],
-        token,
-        "regulation_active"
-      ),
-      lastDecision: cfg.last_decision ?? this._findEntity(
-        "sensor",
-        ["surplus_last_decision_reason"],
-        token,
-        "last_decision"
-      ),
-      surplusRaw: cfg.surplus_raw ?? this._findEntity("sensor", ["surplus_raw_w"], token, "surplus_raw"),
-      surplusEffective: cfg.surplus_effective ?? this._findEntity("sensor", ["surplus_effective_w"], token, "surplus_effective"),
-      surplusDischargeOverLimit: cfg.surplus_discharge_over_limit ?? this._findEntity(
-        "sensor",
-        ["surplus_battery_discharge_over_limit_w"],
-        token,
-        "surplus_discharge_over_limit"
-      ),
-      surplusTargetCurrent: cfg.surplus_target_current ?? this._findEntity(
-        "sensor",
-        ["surplus_target_current_a"],
-        token,
-        "surplus_target_current"
-      )
+  _resolveConfiguredEntities(config) {
+    const token = this._normalizeToken(config.charger_name);
+    const configured = config.entities ?? {};
+    const fallback = (domain, suffix) => token ? `${domain}.${token}_${suffix}` : void 0;
+    return {
+      power: configured.power ?? fallback("sensor", "power_l1"),
+      current: configured.current ?? fallback("sensor", "current_l1"),
+      chargeCurrent: configured.charge_current ?? fallback("number", "charge_current"),
+      chargeSession: configured.charge_session ?? fallback("switch", "charge_session"),
+      surplusMode: configured.surplus_mode ?? fallback("switch", "surplus_mode"),
+      surplusProfile: configured.surplus_profile ?? fallback("select", "surplus_profile"),
+      regulationActive: configured.regulation_active ?? fallback("binary_sensor", "surplus_regulation_active"),
+      lastDecision: configured.last_decision ?? fallback("sensor", "surplus_last_decision_reason"),
+      surplusRaw: configured.surplus_raw ?? fallback("sensor", "surplus_raw_w"),
+      surplusEffective: configured.surplus_effective ?? fallback("sensor", "surplus_effective_w"),
+      surplusDischargeOverLimit: configured.surplus_discharge_over_limit ?? fallback("sensor", "surplus_battery_discharge_over_limit_w"),
+      surplusTargetCurrent: configured.surplus_target_current ?? fallback("sensor", "surplus_target_current_a")
     };
   }
-  _findEntity(domain, suffixes, preferToken, role) {
+  _stateSignature() {
     if (!this.hass) {
-      return void 0;
+      return "no-hass";
     }
-    const all = Object.keys(this.hass.states).filter((entityId) => entityId.startsWith(`${domain}.`)).sort();
-    const roleMatches = all.filter((entityId) => this._entityRole(entityId) === role);
-    const rankedByRole = this._rankCandidates(roleMatches, preferToken);
-    if (rankedByRole.length) {
-      return rankedByRole[0];
+    const trackedIds = this._trackedEntityIds();
+    if (!trackedIds.length) {
+      return "no-tracked-entities";
     }
-    const suffixMatches = all.filter(
-      (entityId) => suffixes.some((suffix) => entityId.endsWith(`_${suffix}`) || entityId.endsWith(suffix))
-    );
-    if (!suffixMatches.length) {
-      return void 0;
-    }
-    const rankedBySuffix = this._rankCandidates(suffixMatches, preferToken);
-    if (rankedBySuffix.length) {
-      return rankedBySuffix[0];
-    }
-    return void 0;
-  }
-  _entityRole(entityId) {
-    const entity = this._entity(entityId);
-    return String(entity?.attributes[ATTR_CARD_ROLE] ?? "").trim();
-  }
-  _entityToken(entityId) {
-    const entity = this._entity(entityId);
-    return this._normalizeToken(String(entity?.attributes[ATTR_CHARGER_TOKEN] ?? ""));
-  }
-  _entityIndex(entityId) {
-    const entity = this._entity(entityId);
-    const parsed = Number(entity?.attributes[ATTR_CARD_INDEX]);
-    return Number.isFinite(parsed) ? parsed : 9999;
-  }
-  _rankCandidates(entityIds, preferToken) {
-    const ranked = entityIds.slice().sort((a3, b3) => {
-      const scoreDiff = this._tokenMatchScore(a3, preferToken) - this._tokenMatchScore(b3, preferToken);
-      if (scoreDiff !== 0) {
-        return scoreDiff;
+    const parts = [];
+    for (const entityId of trackedIds) {
+      const entity = this.hass.states[entityId];
+      if (!entity) {
+        parts.push(`${entityId}:missing`);
+        continue;
       }
-      const indexDiff = this._entityIndex(a3) - this._entityIndex(b3);
-      if (indexDiff !== 0) {
-        return indexDiff;
+      parts.push(`${entityId}:${entity.state}`);
+      if (entityId === this._resolvedEntities.chargeCurrent) {
+        const attributes = entity.attributes;
+        const rawAllowed = attributes.allowed_currents ?? attributes.available_currents ?? attributes.adjust_current_options ?? "";
+        const allowed = Array.isArray(rawAllowed) ? rawAllowed.join(",") : String(rawAllowed);
+        const min = attributes.min ?? attributes.native_min_value ?? "";
+        const max = attributes.max ?? attributes.native_max_value ?? "";
+        const step = attributes.step ?? attributes.native_step ?? "";
+        parts.push(`charge_meta:${allowed}|${min}|${max}|${step}`);
       }
-      return a3.localeCompare(b3);
-    });
-    if (!preferToken) {
-      return ranked;
     }
-    const strict = ranked.filter(
-      (entityId) => this._tokenMatchScore(entityId, preferToken) <= 1
-    );
-    return strict.length ? strict : ranked;
+    return parts.join(";");
   }
-  _tokenMatchScore(entityId, token) {
-    if (!token) {
-      return 1;
-    }
-    const technicalToken = this._entityToken(entityId);
-    if (technicalToken && technicalToken === token) {
-      return 0;
-    }
-    const objectId = this._normalizeToken(entityId.split(".")[1] ?? "");
-    if (objectId === token || objectId.startsWith(`${token}_`)) {
-      return 1;
-    }
-    if (objectId.includes(token)) {
-      return 2;
-    }
-    return 3;
+  _trackedEntityIds() {
+    const all = [
+      this._resolvedEntities.power,
+      this._resolvedEntities.current,
+      this._resolvedEntities.chargeCurrent,
+      this._resolvedEntities.chargeSession,
+      this._resolvedEntities.surplusMode,
+      this._resolvedEntities.surplusProfile,
+      this._resolvedEntities.regulationActive,
+      this._resolvedEntities.lastDecision,
+      this._resolvedEntities.surplusRaw,
+      this._resolvedEntities.surplusEffective,
+      this._resolvedEntities.surplusDischargeOverLimit,
+      this._resolvedEntities.surplusTargetCurrent
+    ];
+    return [...new Set(all.filter((value) => Boolean(value)))];
   }
   _normalizeToken(input) {
     return String(input ?? "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "_");
   }
   _appendGraphSample() {
     if (!this.hass) {
-      return;
+      return false;
+    }
+    const now = Date.now();
+    const lastSample = this._graphHistory[this._graphHistory.length - 1];
+    if (lastSample && now - lastSample.ts < GRAPH_SAMPLE_INTERVAL_MS) {
+      return false;
     }
     const powerW = this._powerW(this._resolvedEntities.power);
     const surplusW = this._powerW(this._resolvedEntities.surplusEffective);
-    const now = Date.now();
     const next = { ts: now, powerW, surplusW };
-    const maxPoints = Math.max(20, Number(this._config?.graph_points ?? 36));
-    const history = [...this._graphHistory, next];
-    this._graphHistory = history.slice(-maxPoints);
+    const cutoffTs = now - GRAPH_WINDOW_MS;
+    const history = [...this._graphHistory, next].filter((sample) => sample.ts >= cutoffTs).slice(-GRAPH_MAX_POINTS);
+    this._graphHistory = history;
+    return true;
   }
   _buildPath(values, min, max, width, height) {
     const step = width / Math.max(1, values.length - 1);
@@ -1490,10 +1460,12 @@ var ENTITY_FIELD_SPECS = [
   }
 ];
 var normalizeToken = (input) => String(input ?? "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "_");
+var ENTITY_FIELD_KEY_SET = new Set(ENTITY_FIELD_SPECS.map((field) => field.key));
 var TuyaEvChargerCardEditor = class extends i4 {
   constructor() {
     super(...arguments);
     this._config = TuyaEvChargerCard.getStubConfig();
+    this._stateIndexCache = /* @__PURE__ */ new WeakMap();
   }
   setConfig(config) {
     this._config = {
@@ -1551,18 +1523,6 @@ var TuyaEvChargerCardEditor = class extends i4 {
     )}
           />
         </label>
-        <label>
-          <span>Graph points</span>
-          <input
-            type="number"
-            min="20"
-            max="120"
-            step="1"
-            .value=${String(cfg.graph_points ?? 40)}
-            @input=${(event) => this._updateGraphPoints(event.target.value)}
-          />
-        </label>
-
         <h3>Entity overrides</h3>
         <p class="hint">
           Optional. Keep "Auto-detected" when possible.
@@ -1591,23 +1551,59 @@ var TuyaEvChargerCardEditor = class extends i4 {
       </div>
     `;
   }
+  _stateIndex() {
+    if (!this.hass) {
+      return {
+        all: [],
+        byDomain: /* @__PURE__ */ new Map(),
+        byRole: /* @__PURE__ */ new Map(),
+        rolesByToken: /* @__PURE__ */ new Map()
+      };
+    }
+    const states = this.hass.states;
+    const cached = this._stateIndexCache.get(states);
+    if (cached) {
+      return cached;
+    }
+    const byDomain = /* @__PURE__ */ new Map();
+    const byRole = /* @__PURE__ */ new Map();
+    const rolesByToken = /* @__PURE__ */ new Map();
+    const all = Object.keys(states).sort();
+    for (const entityId of all) {
+      const [domain] = entityId.split(".");
+      if (domain) {
+        const list = byDomain.get(domain) ?? [];
+        list.push(entityId);
+        byDomain.set(domain, list);
+      }
+      const rawRole = String(states[entityId]?.attributes[ATTR_CARD_ROLE] ?? "").trim();
+      if (!ENTITY_FIELD_KEY_SET.has(rawRole)) {
+        continue;
+      }
+      const role = rawRole;
+      const roleList = byRole.get(role) ?? [];
+      roleList.push(entityId);
+      byRole.set(role, roleList);
+      const token = normalizeToken(
+        String(states[entityId]?.attributes[ATTR_CHARGER_TOKEN] ?? "")
+      );
+      if (!token) {
+        continue;
+      }
+      const tokenRoles = rolesByToken.get(token) ?? /* @__PURE__ */ new Set();
+      tokenRoles.add(role);
+      rolesByToken.set(token, tokenRoles);
+    }
+    const index = { all, byDomain, byRole, rolesByToken };
+    this._stateIndexCache.set(states, index);
+    return index;
+  }
   _detectedChargerTokens() {
     if (!this.hass) {
       return [];
     }
-    const technicalTokens = /* @__PURE__ */ new Map();
-    const eligibleRoles = new Set(ENTITY_FIELD_SPECS.map((field) => field.key));
-    Object.keys(this.hass.states).forEach((entityId) => {
-      const token = this._entityToken(entityId);
-      const role = this._entityRole(entityId);
-      if (!token || !role || !eligibleRoles.has(role)) {
-        return;
-      }
-      const roles = technicalTokens.get(token) ?? /* @__PURE__ */ new Set();
-      roles.add(role);
-      technicalTokens.set(token, roles);
-    });
-    const technicalRanked = [...technicalTokens.entries()].filter(([, roles]) => roles.size >= 2).sort((a3, b3) => b3[1].size - a3[1].size || a3[0].localeCompare(b3[0])).map(([token]) => token);
+    const stateIndex = this._stateIndex();
+    const technicalRanked = [...stateIndex.rolesByToken.entries()].filter(([, roles]) => roles.size >= 2).sort((a3, b3) => b3[1].size - a3[1].size || a3[0].localeCompare(b3[0])).map(([token]) => token);
     if (technicalRanked.length) {
       const selected2 = normalizeToken(this._config.charger_name);
       if (selected2 && !technicalRanked.includes(selected2)) {
@@ -1616,10 +1612,10 @@ var TuyaEvChargerCardEditor = class extends i4 {
       return technicalRanked.slice(0, 20);
     }
     const weighted = /* @__PURE__ */ new Map();
-    const all = Object.keys(this.hass.states).sort();
+    const all = stateIndex.all;
     for (const field of ENTITY_FIELD_SPECS) {
-      const prefix = `${field.domain}.`;
-      all.filter((entityId) => entityId.startsWith(prefix)).forEach((entityId) => {
+      const domainEntities = stateIndex.byDomain.get(field.domain) ?? [];
+      domainEntities.forEach((entityId) => {
         const token = this._extractToken(entityId, field.suffixes);
         if (!token) {
           return;
@@ -1661,12 +1657,12 @@ var TuyaEvChargerCardEditor = class extends i4 {
     if (!this.hass) {
       return [];
     }
+    const stateIndex = this._stateIndex();
     const token = normalizeToken(this._config.charger_name);
-    const prefix = `${field.domain}.`;
-    const all = Object.keys(this.hass.states).filter(
-      (entityId) => entityId.startsWith(prefix)
+    const all = (stateIndex.byDomain.get(field.domain) ?? []).slice();
+    const roleMatches = (stateIndex.byRole.get(field.key) ?? []).filter(
+      (entityId) => entityId.startsWith(`${field.domain}.`)
     );
-    const roleMatches = all.filter((entityId) => this._entityRole(entityId) === field.key);
     const matchingSuffix = all.filter(
       (entityId) => this._matchesSuffix(entityId, field.suffixes)
     );
@@ -1711,8 +1707,11 @@ var TuyaEvChargerCardEditor = class extends i4 {
     if (!this.hass) {
       return void 0;
     }
-    const all = Object.keys(this.hass.states).filter((entityId) => entityId.startsWith(`${field.domain}.`)).sort();
-    const roleMatches = all.filter((entityId) => this._entityRole(entityId) === field.key);
+    const stateIndex = this._stateIndex();
+    const all = (stateIndex.byDomain.get(field.domain) ?? []).slice();
+    const roleMatches = (stateIndex.byRole.get(field.key) ?? []).filter(
+      (entityId) => entityId.startsWith(`${field.domain}.`)
+    );
     const rankedByRole = roleMatches.sort((a3, b3) => {
       const scoreDiff = this._tokenScore(a3, token) - this._tokenScore(b3, token);
       if (scoreDiff !== 0) {
@@ -1740,12 +1739,6 @@ var TuyaEvChargerCardEditor = class extends i4 {
     return suffixes.some(
       (suffix) => entityId.endsWith(`_${suffix}`) || entityId.endsWith(suffix)
     );
-  }
-  _entityRole(entityId) {
-    if (!this.hass) {
-      return "";
-    }
-    return String(this.hass.states[entityId]?.attributes[ATTR_CARD_ROLE] ?? "").trim();
   }
   _entityToken(entityId) {
     if (!this.hass) {
@@ -1826,17 +1819,6 @@ var TuyaEvChargerCardEditor = class extends i4 {
       next[key] = trimmed;
     } else {
       delete next[key];
-    }
-    this._emit(next);
-  }
-  _updateGraphPoints(rawValue) {
-    const parsed = Number(rawValue);
-    const next = { ...this._config };
-    if (!Number.isFinite(parsed)) {
-      delete next.graph_points;
-    } else {
-      const clamped = Math.max(20, Math.min(120, Math.round(parsed)));
-      next.graph_points = clamped;
     }
     this._emit(next);
   }

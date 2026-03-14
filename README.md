@@ -8,7 +8,7 @@ Modern and sober UI with:
 - Surplus mode toggle
 - Surplus profile selector (`eco`, `balanced`, `fast`)
 - Charge current adjust (`number.charge_current`)
-- Mini graph (power and effective surplus)
+- Mini graph (power and effective surplus, 30s samples over a 1h window)
 - Details panel with debug values
 - Built-in Lovelace visual editor (instance auto-detection + dropdown entity selectors + auto-fill)
 
@@ -24,7 +24,6 @@ Modern and sober UI with:
 type: custom:tuya-ev-charger-card
 title: EV Charger
 charger_name: tuya_ev_charger
-graph_points: 40
 entities:
   charge_session: switch.tuya_ev_charger_charge_session
   surplus_mode: switch.tuya_ev_charger_surplus_mode
