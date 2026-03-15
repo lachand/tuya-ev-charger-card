@@ -9,7 +9,7 @@ Modern and sober UI with:
 - Surplus profile selector (`eco`, `balanced`, `fast`)
 - Charge current adjust (`number.charge_current`)
 - Optimistic controls (instant UI feedback before state sync)
-- Mini graph (power and effective surplus, 30s samples over a 1h window)
+- Mini graph (preloads 1h from Home Assistant Recorder, then live 30s samples)
 - Details panel with debug values
 - Built-in Lovelace visual editor (instance auto-detection + dropdown entity selectors + auto-fill)
 

@@ -557,6 +557,7 @@ var ATTR_CHARGER_TOKEN = "tuya_ev_charger_token";
 var GRAPH_SAMPLE_INTERVAL_MS = 3e4;
 var GRAPH_WINDOW_MS = 36e5;
 var GRAPH_MAX_POINTS = GRAPH_WINDOW_MS / GRAPH_SAMPLE_INTERVAL_MS;
+var GRAPH_HISTORY_RETRY_MS = 6e4;
 var OPTIMISTIC_TIMEOUT_MS = 12e3;
 var TuyaEvChargerCard = class extends i4 {
   constructor() {
@@ -564,10 +565,14 @@ var TuyaEvChargerCard = class extends i4 {
     this._detailsOpen = false;
     this._debugOpen = false;
     this._graphHistory = [];
+    this._graphHistoryLoading = false;
     this._resolvedEntities = {};
     this._lastRenderSignature = "";
     this._optimisticStates = {};
     this._optimisticTimeouts = /* @__PURE__ */ new Map();
+    this._graphHistoryFetchInFlight = false;
+    this._graphHistoryHydratedKey = "";
+    this._graphHistoryLastFailedAt = 0;
     this._toggleDetails = () => {
       this._detailsOpen = !this._detailsOpen;
     };
@@ -590,11 +595,17 @@ var TuyaEvChargerCard = class extends i4 {
     }
     this._config = config;
     this._resolvedEntities = this._resolveConfiguredEntities(config);
+    this._graphHistory = [];
+    this._graphHistoryLoading = false;
+    this._graphHistoryHydratedKey = "";
+    this._graphHistoryLastFailedAt = 0;
     this._clearAllOptimisticStates();
     this._lastRenderSignature = "";
   }
   disconnectedCallback() {
     this._clearAllOptimisticStates();
+    this._graphHistoryFetchInFlight = false;
+    this._graphHistoryLoading = false;
     super.disconnectedCallback();
   }
   shouldUpdate(changed) {
@@ -603,6 +614,7 @@ var TuyaEvChargerCard = class extends i4 {
     }
     if (changed.has("hass")) {
       this._syncOptimisticStatesWithHass();
+      this._maybeHydrateGraphHistory();
       const graphChanged = this._appendGraphSample();
       const nextSignature = this._stateSignature();
       const stateChanged = nextSignature !== this._lastRenderSignature;
@@ -778,7 +790,9 @@ var TuyaEvChargerCard = class extends i4 {
   _renderGraph() {
     const points = this._graphHistory;
     if (points.length < 2) {
-      return b2`<div class="graph-empty">Collecting graph samples...</div>`;
+      return b2`<div class="graph-empty"
+        >${this._graphHistoryLoading ? "Loading history..." : "Collecting graph samples..."}</div
+      >`;
     }
     const width = 360;
     const height = 90;
@@ -979,6 +993,157 @@ var TuyaEvChargerCard = class extends i4 {
     this._graphHistory = history;
     return true;
   }
+  _graphHydrationKey() {
+    return [this._resolvedEntities.power, this._resolvedEntities.surplusEffective].filter((value) => Boolean(value)).join("|");
+  }
+  _maybeHydrateGraphHistory() {
+    const key = this._graphHydrationKey();
+    if (!this.hass || !this.hass.callApi || !key) {
+      return;
+    }
+    if (this._graphHistoryFetchInFlight) {
+      return;
+    }
+    if (this._graphHistoryHydratedKey === key && this._graphHistory.length >= 2) {
+      return;
+    }
+    if (this._graphHistoryLastFailedAt > 0 && Date.now() - this._graphHistoryLastFailedAt < GRAPH_HISTORY_RETRY_MS) {
+      return;
+    }
+    void this._hydrateGraphHistory(key);
+  }
+  async _hydrateGraphHistory(key) {
+    if (!this.hass || !this.hass.callApi) {
+      return;
+    }
+    const entityIds = [
+      this._resolvedEntities.power,
+      this._resolvedEntities.surplusEffective
+    ].filter((value) => Boolean(value));
+    if (!entityIds.length) {
+      return;
+    }
+    this._graphHistoryFetchInFlight = true;
+    this._graphHistoryLoading = true;
+    const endTs = Date.now();
+    const startTs = endTs - GRAPH_WINDOW_MS;
+    const startIso = encodeURIComponent(new Date(startTs).toISOString());
+    const endIso = encodeURIComponent(new Date(endTs).toISOString());
+    const filterEntityId = encodeURIComponent([...new Set(entityIds)].join(","));
+    const path = `history/period/${startIso}?filter_entity_id=${filterEntityId}&end_time=${endIso}&significant_changes_only=0`;
+    try {
+      const payload = await this.hass.callApi("GET", path);
+      if (key !== this._graphHydrationKey()) {
+        return;
+      }
+      const merged = this._buildHistoryGraphSamples(payload, startTs, endTs);
+      this._graphHistoryHydratedKey = key;
+      if (merged.length) {
+        this._graphHistory = merged;
+        this._graphHistoryLastFailedAt = 0;
+      }
+    } catch {
+      this._graphHistoryLastFailedAt = Date.now();
+    } finally {
+      this._graphHistoryFetchInFlight = false;
+      this._graphHistoryLoading = false;
+    }
+  }
+  _buildHistoryGraphSamples(payload, startTs, endTs) {
+    const grouped = this._historyByEntity(payload);
+    const powerSeries = this._seriesFromHistory(
+      grouped.get(this._resolvedEntities.power ?? "") ?? [],
+      this._resolvedEntities.power
+    );
+    const surplusSeries = this._seriesFromHistory(
+      grouped.get(this._resolvedEntities.surplusEffective ?? "") ?? [],
+      this._resolvedEntities.surplusEffective
+    );
+    if (!powerSeries.length && !surplusSeries.length) {
+      return [];
+    }
+    const alignedStartTs = Math.floor(startTs / GRAPH_SAMPLE_INTERVAL_MS) * GRAPH_SAMPLE_INTERVAL_MS;
+    const points = [];
+    let powerIndex = 0;
+    let surplusIndex = 0;
+    let powerValue = null;
+    let surplusValue = null;
+    for (let ts = alignedStartTs; ts <= endTs; ts += GRAPH_SAMPLE_INTERVAL_MS) {
+      while (powerIndex < powerSeries.length && powerSeries[powerIndex].ts <= ts) {
+        powerValue = powerSeries[powerIndex].valueW;
+        powerIndex += 1;
+      }
+      while (surplusIndex < surplusSeries.length && surplusSeries[surplusIndex].ts <= ts) {
+        surplusValue = surplusSeries[surplusIndex].valueW;
+        surplusIndex += 1;
+      }
+      points.push({ ts, powerW: powerValue, surplusW: surplusValue });
+    }
+    return points.filter((sample) => sample.powerW !== null || sample.surplusW !== null).slice(-GRAPH_MAX_POINTS);
+  }
+  _historyByEntity(payload) {
+    const grouped = /* @__PURE__ */ new Map();
+    if (!Array.isArray(payload)) {
+      return grouped;
+    }
+    for (const rawSeries of payload) {
+      if (!Array.isArray(rawSeries)) {
+        continue;
+      }
+      let fallbackEntityId = "";
+      for (const rawState of rawSeries) {
+        if (!rawState || typeof rawState !== "object") {
+          continue;
+        }
+        const state = rawState;
+        const entityIdRaw = state.entity_id;
+        if (typeof entityIdRaw === "string" && entityIdRaw.trim()) {
+          fallbackEntityId = entityIdRaw.trim();
+        }
+        if (!fallbackEntityId) {
+          continue;
+        }
+        const list = grouped.get(fallbackEntityId) ?? [];
+        list.push(state);
+        grouped.set(fallbackEntityId, list);
+      }
+    }
+    return grouped;
+  }
+  _seriesFromHistory(history, entityId) {
+    const unit = this._entityPowerUnit(entityId);
+    const series = [];
+    for (const row of history) {
+      const ts = this._historyTimestamp(row);
+      if (ts === null) {
+        continue;
+      }
+      const value = this._historyPowerValue(row.state);
+      const valueW = value === null ? null : this._convertPowerToWatts(value, unit);
+      series.push({ ts, valueW });
+    }
+    series.sort((a3, b3) => a3.ts - b3.ts);
+    return series;
+  }
+  _historyTimestamp(row) {
+    const rawTimestamp = row.last_changed ?? row.last_updated;
+    if (typeof rawTimestamp !== "string") {
+      return null;
+    }
+    const parsed = Date.parse(rawTimestamp);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  _historyPowerValue(value) {
+    if (value === null || value === void 0) {
+      return null;
+    }
+    const raw = String(value).trim().toLowerCase();
+    if (!raw || raw === "unknown" || raw === "unavailable" || raw === "none") {
+      return null;
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
   _buildPath(values, min, max, width, height) {
     const step = width / Math.max(1, values.length - 1);
     let path = "";
@@ -1035,13 +1200,17 @@ var TuyaEvChargerCard = class extends i4 {
     if (parsed === null) {
       return null;
     }
-    const unit = String(
-      entity.attributes.unit_of_measurement ?? entity.attributes.native_unit_of_measurement ?? ""
+    const unit = this._entityPowerUnit(entityId);
+    return this._convertPowerToWatts(parsed, unit);
+  }
+  _entityPowerUnit(entityId) {
+    const entity = this._entity(entityId);
+    return String(
+      entity?.attributes.unit_of_measurement ?? entity?.attributes.native_unit_of_measurement ?? ""
     ).trim().toLowerCase();
-    if (unit === "kw") {
-      return parsed * 1e3;
-    }
-    return parsed;
+  }
+  _convertPowerToWatts(value, unit) {
+    return unit === "kw" ? value * 1e3 : value;
   }
   _attrNumber(entity, key) {
     if (!entity) {
@@ -1193,6 +1362,7 @@ TuyaEvChargerCard.properties = {
   _detailsOpen: { state: true },
   _debugOpen: { state: true },
   _graphHistory: { state: true },
+  _graphHistoryLoading: { state: true },
   _resolvedEntities: { state: true },
   _optimisticStates: { state: true }
 };

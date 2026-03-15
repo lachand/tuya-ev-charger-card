@@ -13,6 +13,11 @@ interface HomeAssistant {
     service: string,
     serviceData?: Record<string, unknown>
   ) => Promise<void>;
+  callApi?: (
+    method: string,
+    path: string,
+    parameters?: Record<string, unknown>
+  ) => Promise<unknown>;
 }
 
 interface CardConfig {
@@ -57,6 +62,11 @@ interface GraphSample {
   surplusW: number | null;
 }
 
+interface HistorySeriesPoint {
+  ts: number;
+  valueW: number | null;
+}
+
 const PROFILE_OPTIONS = ["eco", "balanced", "fast"] as const;
 const ATTR_CARD_ROLE = "tuya_ev_charger_card_role";
 const ATTR_CARD_INDEX = "tuya_ev_charger_card_index";
@@ -64,6 +74,7 @@ const ATTR_CHARGER_TOKEN = "tuya_ev_charger_token";
 const GRAPH_SAMPLE_INTERVAL_MS = 30_000;
 const GRAPH_WINDOW_MS = 3_600_000;
 const GRAPH_MAX_POINTS = GRAPH_WINDOW_MS / GRAPH_SAMPLE_INTERVAL_MS;
+const GRAPH_HISTORY_RETRY_MS = 60_000;
 const OPTIMISTIC_TIMEOUT_MS = 12_000;
 
 class TuyaEvChargerCard extends LitElement {
@@ -73,10 +84,14 @@ class TuyaEvChargerCard extends LitElement {
   private _detailsOpen = false;
   private _debugOpen = false;
   private _graphHistory: GraphSample[] = [];
+  private _graphHistoryLoading = false;
   private _resolvedEntities: ResolvedEntities = {};
   private _lastRenderSignature = "";
   private _optimisticStates: Record<string, string> = {};
   private _optimisticTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+  private _graphHistoryFetchInFlight = false;
+  private _graphHistoryHydratedKey = "";
+  private _graphHistoryLastFailedAt = 0;
 
   static properties = {
     hass: { attribute: false },
@@ -84,6 +99,7 @@ class TuyaEvChargerCard extends LitElement {
     _detailsOpen: { state: true },
     _debugOpen: { state: true },
     _graphHistory: { state: true },
+    _graphHistoryLoading: { state: true },
     _resolvedEntities: { state: true },
     _optimisticStates: { state: true },
   };
@@ -105,12 +121,18 @@ class TuyaEvChargerCard extends LitElement {
     }
     this._config = config;
     this._resolvedEntities = this._resolveConfiguredEntities(config);
+    this._graphHistory = [];
+    this._graphHistoryLoading = false;
+    this._graphHistoryHydratedKey = "";
+    this._graphHistoryLastFailedAt = 0;
     this._clearAllOptimisticStates();
     this._lastRenderSignature = "";
   }
 
   public disconnectedCallback(): void {
     this._clearAllOptimisticStates();
+    this._graphHistoryFetchInFlight = false;
+    this._graphHistoryLoading = false;
     super.disconnectedCallback();
   }
 
@@ -128,6 +150,7 @@ class TuyaEvChargerCard extends LitElement {
 
     if (changed.has("hass")) {
       this._syncOptimisticStatesWithHass();
+      this._maybeHydrateGraphHistory();
       const graphChanged = this._appendGraphSample();
       const nextSignature = this._stateSignature();
       const stateChanged = nextSignature !== this._lastRenderSignature;
@@ -325,7 +348,9 @@ class TuyaEvChargerCard extends LitElement {
   private _renderGraph() {
     const points = this._graphHistory;
     if (points.length < 2) {
-      return html`<div class="graph-empty">Collecting graph samples...</div>`;
+      return html`<div class="graph-empty"
+        >${this._graphHistoryLoading ? "Loading history..." : "Collecting graph samples..."}</div
+      >`;
     }
     const width = 360;
     const height = 90;
@@ -567,6 +592,191 @@ class TuyaEvChargerCard extends LitElement {
     return true;
   }
 
+  private _graphHydrationKey(): string {
+    return [this._resolvedEntities.power, this._resolvedEntities.surplusEffective]
+      .filter((value): value is string => Boolean(value))
+      .join("|");
+  }
+
+  private _maybeHydrateGraphHistory(): void {
+    const key = this._graphHydrationKey();
+    if (!this.hass || !this.hass.callApi || !key) {
+      return;
+    }
+    if (this._graphHistoryFetchInFlight) {
+      return;
+    }
+    if (this._graphHistoryHydratedKey === key && this._graphHistory.length >= 2) {
+      return;
+    }
+    if (
+      this._graphHistoryLastFailedAt > 0 &&
+      Date.now() - this._graphHistoryLastFailedAt < GRAPH_HISTORY_RETRY_MS
+    ) {
+      return;
+    }
+    void this._hydrateGraphHistory(key);
+  }
+
+  private async _hydrateGraphHistory(key: string): Promise<void> {
+    if (!this.hass || !this.hass.callApi) {
+      return;
+    }
+    const entityIds = [
+      this._resolvedEntities.power,
+      this._resolvedEntities.surplusEffective,
+    ].filter((value): value is string => Boolean(value));
+    if (!entityIds.length) {
+      return;
+    }
+
+    this._graphHistoryFetchInFlight = true;
+    this._graphHistoryLoading = true;
+    const endTs = Date.now();
+    const startTs = endTs - GRAPH_WINDOW_MS;
+    const startIso = encodeURIComponent(new Date(startTs).toISOString());
+    const endIso = encodeURIComponent(new Date(endTs).toISOString());
+    const filterEntityId = encodeURIComponent([...new Set(entityIds)].join(","));
+    const path =
+      `history/period/${startIso}?filter_entity_id=${filterEntityId}` +
+      `&end_time=${endIso}&significant_changes_only=0`;
+
+    try {
+      const payload = await this.hass.callApi("GET", path);
+      if (key !== this._graphHydrationKey()) {
+        return;
+      }
+      const merged = this._buildHistoryGraphSamples(payload, startTs, endTs);
+      this._graphHistoryHydratedKey = key;
+      if (merged.length) {
+        this._graphHistory = merged;
+        this._graphHistoryLastFailedAt = 0;
+      }
+    } catch {
+      this._graphHistoryLastFailedAt = Date.now();
+    } finally {
+      this._graphHistoryFetchInFlight = false;
+      this._graphHistoryLoading = false;
+    }
+  }
+
+  private _buildHistoryGraphSamples(
+    payload: unknown,
+    startTs: number,
+    endTs: number
+  ): GraphSample[] {
+    const grouped = this._historyByEntity(payload);
+    const powerSeries = this._seriesFromHistory(
+      grouped.get(this._resolvedEntities.power ?? "") ?? [],
+      this._resolvedEntities.power
+    );
+    const surplusSeries = this._seriesFromHistory(
+      grouped.get(this._resolvedEntities.surplusEffective ?? "") ?? [],
+      this._resolvedEntities.surplusEffective
+    );
+    if (!powerSeries.length && !surplusSeries.length) {
+      return [];
+    }
+
+    const alignedStartTs =
+      Math.floor(startTs / GRAPH_SAMPLE_INTERVAL_MS) * GRAPH_SAMPLE_INTERVAL_MS;
+    const points: GraphSample[] = [];
+    let powerIndex = 0;
+    let surplusIndex = 0;
+    let powerValue: number | null = null;
+    let surplusValue: number | null = null;
+
+    for (let ts = alignedStartTs; ts <= endTs; ts += GRAPH_SAMPLE_INTERVAL_MS) {
+      while (powerIndex < powerSeries.length && powerSeries[powerIndex].ts <= ts) {
+        powerValue = powerSeries[powerIndex].valueW;
+        powerIndex += 1;
+      }
+      while (surplusIndex < surplusSeries.length && surplusSeries[surplusIndex].ts <= ts) {
+        surplusValue = surplusSeries[surplusIndex].valueW;
+        surplusIndex += 1;
+      }
+      points.push({ ts, powerW: powerValue, surplusW: surplusValue });
+    }
+
+    return points
+      .filter((sample) => sample.powerW !== null || sample.surplusW !== null)
+      .slice(-GRAPH_MAX_POINTS);
+  }
+
+  private _historyByEntity(payload: unknown): Map<string, Array<Record<string, unknown>>> {
+    const grouped = new Map<string, Array<Record<string, unknown>>>();
+    if (!Array.isArray(payload)) {
+      return grouped;
+    }
+
+    for (const rawSeries of payload) {
+      if (!Array.isArray(rawSeries)) {
+        continue;
+      }
+      let fallbackEntityId = "";
+      for (const rawState of rawSeries) {
+        if (!rawState || typeof rawState !== "object") {
+          continue;
+        }
+        const state = rawState as Record<string, unknown>;
+        const entityIdRaw = state.entity_id;
+        if (typeof entityIdRaw === "string" && entityIdRaw.trim()) {
+          fallbackEntityId = entityIdRaw.trim();
+        }
+        if (!fallbackEntityId) {
+          continue;
+        }
+        const list = grouped.get(fallbackEntityId) ?? [];
+        list.push(state);
+        grouped.set(fallbackEntityId, list);
+      }
+    }
+
+    return grouped;
+  }
+
+  private _seriesFromHistory(
+    history: Array<Record<string, unknown>>,
+    entityId?: string
+  ): HistorySeriesPoint[] {
+    const unit = this._entityPowerUnit(entityId);
+    const series: HistorySeriesPoint[] = [];
+
+    for (const row of history) {
+      const ts = this._historyTimestamp(row);
+      if (ts === null) {
+        continue;
+      }
+      const value = this._historyPowerValue(row.state);
+      const valueW = value === null ? null : this._convertPowerToWatts(value, unit);
+      series.push({ ts, valueW });
+    }
+
+    series.sort((a, b) => a.ts - b.ts);
+    return series;
+  }
+
+  private _historyTimestamp(row: Record<string, unknown>): number | null {
+    const rawTimestamp = row.last_changed ?? row.last_updated;
+    if (typeof rawTimestamp !== "string") {
+      return null;
+    }
+    const parsed = Date.parse(rawTimestamp);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  private _historyPowerValue(value: unknown): number | null {
+    if (value === null || value === undefined) {
+      return null;
+    }
+    const raw = String(value).trim().toLowerCase();
+    if (!raw || raw === "unknown" || raw === "unavailable" || raw === "none") {
+      return null;
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
   private _buildPath(
     values: Array<number | null>,
     min: number,
@@ -640,15 +850,21 @@ class TuyaEvChargerCard extends LitElement {
     if (parsed === null) {
       return null;
     }
-    const unit = String(
-      entity.attributes.unit_of_measurement ?? entity.attributes.native_unit_of_measurement ?? ""
+    const unit = this._entityPowerUnit(entityId);
+    return this._convertPowerToWatts(parsed, unit);
+  }
+
+  private _entityPowerUnit(entityId?: string): string {
+    const entity = this._entity(entityId);
+    return String(
+      entity?.attributes.unit_of_measurement ?? entity?.attributes.native_unit_of_measurement ?? ""
     )
       .trim()
       .toLowerCase();
-    if (unit === "kw") {
-      return parsed * 1000;
-    }
-    return parsed;
+  }
+
+  private _convertPowerToWatts(value: number, unit: string): number {
+    return unit === "kw" ? value * 1000 : value;
   }
 
   private _attrNumber(entity: HassEntity | undefined, key: string): number | null {
