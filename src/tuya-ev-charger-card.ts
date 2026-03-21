@@ -347,7 +347,7 @@ class TuyaEvChargerCard extends LitElement {
         <!-- Charge current control -->
         <div class="current-box">
           <div class="current-label">
-            <span class="mso" style="font-size:1rem;color:var(--kin-primary)">current_ac</span>
+            <span class="mso" style="font-size:1rem;color:var(--kin-primary)">tune</span>
             Charge current
           </div>
           <div class="current-ctrl">
