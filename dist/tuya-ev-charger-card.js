@@ -551,55 +551,68 @@ o4?.({ LitElement: i4 });
 
 // src/tuya-ev-charger-card.ts
 var PROFILE_OPTIONS = ["eco", "balanced", "fast"];
+var PROFILE_META = {
+  eco: { label: "Eco", start: 2200, stop: 1700, icon: "eco" },
+  balanced: { label: "Balanced", start: 1600, stop: 1200, icon: "balance" },
+  fast: { label: "Fast", start: 1200, stop: 900, icon: "bolt" }
+};
 var ATTR_CARD_ROLE = "tuya_ev_charger_card_role";
-var ATTR_CARD_INDEX = "tuya_ev_charger_card_index";
 var ATTR_CHARGER_TOKEN = "tuya_ev_charger_token";
 var GRAPH_SAMPLE_INTERVAL_MS = 3e4;
 var GRAPH_WINDOW_MS = 36e5;
 var GRAPH_MAX_POINTS = GRAPH_WINDOW_MS / GRAPH_SAMPLE_INTERVAL_MS;
 var GRAPH_HISTORY_RETRY_MS = 6e4;
 var OPTIMISTIC_TIMEOUT_MS = 12e3;
+var GAUGE_R = 43;
+var GAUGE_CIRC = 2 * Math.PI * GAUGE_R;
+var GAUGE_MAX_W = 11e3;
+var THRESHOLD_MAX_W = 6e3;
+var THRESHOLD_STEP_W = 100;
 var TuyaEvChargerCard = class extends i4 {
   constructor() {
     super(...arguments);
-    this._detailsOpen = false;
-    this._debugOpen = false;
+    this._activeTab = "dashboard";
     this._graphHistory = [];
     this._graphHistoryLoading = false;
     this._resolvedEntities = {};
     this._lastRenderSignature = "";
     this._optimisticStates = {};
     this._optimisticTimeouts = /* @__PURE__ */ new Map();
+    this._sliderValues = {};
     this._graphHistoryFetchInFlight = false;
     this._graphHistoryHydratedKey = "";
     this._graphHistoryLastFailedAt = 0;
-    this._toggleDetails = () => {
-      this._detailsOpen = !this._detailsOpen;
-    };
-    this._toggleDebug = () => {
-      this._debugOpen = !this._debugOpen;
-    };
   }
   static getStubConfig() {
-    return {
-      type: "custom:tuya-ev-charger-card",
-      title: "EV Charger"
-    };
+    return { type: "custom:tuya-ev-charger-card", title: "EV Charger" };
   }
   static getConfigElement() {
     return document.createElement("tuya-ev-charger-card-editor");
+  }
+  connectedCallback() {
+    super.connectedCallback();
+    this._injectFonts();
+  }
+  _injectFonts() {
+    if (document.querySelector("#tuya-ev-charger-fonts")) return;
+    const link = document.createElement("link");
+    link.id = "tuya-ev-charger-fonts";
+    link.rel = "stylesheet";
+    link.href = "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700;900&family=Inter:wght@400;500;600;700&family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap";
+    document.head.appendChild(link);
   }
   setConfig(config) {
     if (!config || config.type !== "custom:tuya-ev-charger-card") {
       throw new Error("Invalid card configuration.");
     }
     this._config = config;
-    this._resolvedEntities = this._resolveConfiguredEntities(config);
+    this._resolvedEntities = this._resolveEntities(config);
     this._graphHistory = [];
     this._graphHistoryLoading = false;
     this._graphHistoryHydratedKey = "";
     this._graphHistoryLastFailedAt = 0;
     this._clearAllOptimisticStates();
+    this._sliderValues = {};
     this._lastRenderSignature = "";
   }
   disconnectedCallback() {
@@ -609,420 +622,519 @@ var TuyaEvChargerCard = class extends i4 {
     super.disconnectedCallback();
   }
   shouldUpdate(changed) {
-    if (changed.has("_config") || changed.has("_resolvedEntities") || changed.has("_detailsOpen") || changed.has("_debugOpen") || changed.has("_graphHistory") || changed.has("_optimisticStates")) {
+    if (changed.has("_config") || changed.has("_resolvedEntities") || changed.has("_activeTab") || changed.has("_graphHistory") || changed.has("_optimisticStates") || changed.has("_sliderValues")) {
       return true;
     }
     if (changed.has("hass")) {
       this._syncOptimisticStatesWithHass();
       this._maybeHydrateGraphHistory();
       const graphChanged = this._appendGraphSample();
-      const nextSignature = this._stateSignature();
-      const stateChanged = nextSignature !== this._lastRenderSignature;
-      if (stateChanged) {
-        this._lastRenderSignature = nextSignature;
-      }
+      const next = this._stateSignature();
+      const stateChanged = next !== this._lastRenderSignature;
+      if (stateChanged) this._lastRenderSignature = next;
       return graphChanged || stateChanged;
     }
     return false;
   }
+  /* ─── Render ─────────────────────────────────────────────────────────── */
   render() {
     if (!this._config || !this.hass) {
       return b2`<ha-card><div class="pad">Card not ready.</div></ha-card>`;
     }
-    const title = this._config.title ?? "Tuya EV Charger";
-    const chargeOn = this._isOn(this._resolvedEntities.chargeSession);
-    const surplusOn = this._isOn(this._resolvedEntities.surplusMode);
-    const regulationOn = this._isOn(this._resolvedEntities.regulationActive);
-    const powerW = this._powerW(this._resolvedEntities.power);
-    const currentA = this._numberState(this._resolvedEntities.current);
-    const targetA = this._numberState(this._resolvedEntities.surplusTargetCurrent);
-    const profile = this._state(this._resolvedEntities.surplusProfile) ?? "balanced";
-    const lastDecision = this._state(this._resolvedEntities.lastDecision) ?? "unavailable";
-    const rawSurplusW = this._powerW(this._resolvedEntities.surplusRaw);
-    const effectiveSurplusW = this._powerW(this._resolvedEntities.surplusEffective);
-    const dischargeOverLimitW = this._powerW(
-      this._resolvedEntities.surplusDischargeOverLimit
-    );
-    const chargeCurrentEntity = this._entity(this._resolvedEntities.chargeCurrent);
-    const chargeCurrentSetpoint = this._numberState(this._resolvedEntities.chargeCurrent);
-    const allowedCurrents = this._allowedCurrents(chargeCurrentEntity);
-    const currentMin = this._attrNumber(chargeCurrentEntity, "min") ?? this._attrNumber(chargeCurrentEntity, "native_min_value") ?? 6;
-    const currentMax = this._attrNumber(chargeCurrentEntity, "max") ?? this._attrNumber(chargeCurrentEntity, "native_max_value") ?? 16;
-    const currentStep = this._attrNumber(chargeCurrentEntity, "step") ?? this._attrNumber(chargeCurrentEntity, "native_step") ?? 1;
     return b2`
       <ha-card>
-        <div class="card">
-          <div class="header">
-            <div>
-              <div class="title">${title}</div>
-              <div class="subtitle">Tuya EV Charger Local</div>
-            </div>
-            <div class="chips">
-              <span class="chip ${chargeOn ? "ok" : "off"}"
-                >${chargeOn ? "Charging" : "Idle"}</span
-              >
-              <span class="chip ${surplusOn ? "ok" : "off"}"
-                >${surplusOn ? "Surplus" : "Manual"}</span
-              >
-              <span class="chip ${regulationOn ? "ok" : "off"}"
-                >${regulationOn ? "Regulating" : "Hold"}</span
-              >
-            </div>
-          </div>
-
-          <div class="metrics">
-            ${this._metric("Power", this._formatPower(powerW))}
-            ${this._metric("Current", this._formatAmp(currentA))}
-            ${this._metric("Target", this._formatAmp(targetA))}
-          </div>
-
-          ${this._renderGraph()}
-
-          <div class="controls">
-            <button
-              class="btn primary"
-              @click=${this._onChargeSessionToggle}
-              ?disabled=${!this._resolvedEntities.chargeSession}
-            >
-              ${chargeOn ? "Stop" : "Start"}
-            </button>
-            <button
-              class="btn"
-              @click=${this._onSurplusModeToggle}
-              ?disabled=${!this._resolvedEntities.surplusMode}
-            >
-              ${surplusOn ? "Surplus On" : "Surplus Off"}
-            </button>
-          </div>
-
-          <div class="current-box">
-            <button
-              class="btn tiny"
-              @click=${() => {
-      const target = this._stepChargeCurrent(
-        -1,
-        chargeCurrentSetpoint,
-        allowedCurrents,
-        currentMin,
-        currentMax,
-        currentStep
-      );
-      this._setChargeCurrent(target, currentMin, currentMax, allowedCurrents);
-    }}
-              ?disabled=${!this._resolvedEntities.chargeCurrent}
-            >
-              -
-            </button>
-            <div class="current-value">${this._formatAmp(chargeCurrentSetpoint)}</div>
-            <button
-              class="btn tiny"
-              @click=${() => {
-      const target = this._stepChargeCurrent(
-        1,
-        chargeCurrentSetpoint,
-        allowedCurrents,
-        currentMin,
-        currentMax,
-        currentStep
-      );
-      this._setChargeCurrent(target, currentMin, currentMax, allowedCurrents);
-    }}
-              ?disabled=${!this._resolvedEntities.chargeCurrent}
-            >
-              +
-            </button>
-          </div>
-
-          <div class="profiles">
-            ${PROFILE_OPTIONS.map(
-      (option) => b2`
-                <button
-                  class="profile ${profile === option ? "active" : ""}"
-                  @click=${() => this._setProfile(option)}
-                  ?disabled=${!this._resolvedEntities.surplusProfile}
-                >
-                  ${option}
-                </button>
-              `
-    )}
-          </div>
-
-          <button class="details-toggle" @click=${this._toggleDetails}>
-            ${this._detailsOpen ? "Hide details" : "Show details"}
-          </button>
-
-          ${this._detailsOpen ? b2`
-                <div class="details">
-                  <div class="detail-row">
-                    <span>Last decision</span>
-                    <strong>${lastDecision}</strong>
-                  </div>
-                  <div class="detail-row">
-                    <span>Surplus effective</span>
-                    <strong>${this._formatPower(effectiveSurplusW)}</strong>
-                  </div>
-                  <button class="debug-toggle" @click=${this._toggleDebug}>
-                    ${this._debugOpen ? "Hide debug" : "Show debug"}
-                  </button>
-                  ${this._debugOpen ? b2`
-                        <div class="debug-grid">
-                          ${this._debugValue("Raw surplus", this._formatPower(rawSurplusW))}
-                          ${this._debugValue(
-      "Effective surplus",
-      this._formatPower(effectiveSurplusW)
-    )}
-                          ${this._debugValue(
-      "Battery over limit",
-      this._formatPower(dischargeOverLimitW)
-    )}
-                          ${this._debugValue(
-      "Target current",
-      this._formatAmp(targetA)
-    )}
-                        </div>
-                      ` : A}
-                </div>
-              ` : A}
+        <div class="app">
+          <div class="app-content">${this._renderTab()}</div>
+          ${this._renderNav()}
         </div>
       </ha-card>
     `;
   }
-  _renderGraph() {
-    const points = this._graphHistory;
-    if (points.length < 2) {
-      return b2`<div class="graph-empty"
-        >${this._graphHistoryLoading ? "Loading history..." : "Collecting graph samples..."}</div
-      >`;
+  _renderTab() {
+    switch (this._activeTab) {
+      case "dashboard":
+        return this._renderDashboard();
+      case "strategy":
+        return this._renderStrategy();
+      case "logs":
+        return this._renderLogs();
     }
-    const width = 360;
-    const height = 90;
-    const allValues = points.flatMap(
-      (sample) => [sample.powerW, sample.surplusW].filter((v2) => v2 !== null)
-    );
-    const maxAbs = Math.max(500, ...allValues.map((v2) => Math.abs(v2)));
-    const min = -maxAbs;
-    const max = maxAbs;
-    const powerPath = this._buildPath(
-      points.map((sample) => sample.powerW),
-      min,
-      max,
-      width,
-      height
-    );
-    const surplusPath = this._buildPath(
-      points.map((sample) => sample.surplusW),
-      min,
-      max,
-      width,
-      height
-    );
-    const zeroY = this._scaleY(0, min, max, height);
+  }
+  /* ─── Dashboard ──────────────────────────────────────────────────────── */
+  _renderDashboard() {
+    const e4 = this._resolvedEntities;
+    const chargeOn = this._isOn(e4.chargeSession);
+    const surplusOn = this._isOn(e4.surplusMode);
+    const regulationOn = this._isOn(e4.regulationActive);
+    const powerW = this._powerW(e4.power);
+    const currentA = this._numberState(e4.current);
+    const voltageV = this._numberState(e4.voltage);
+    const tempC = this._numberState(e4.temperature);
+    const workState = this._state(e4.workState) ?? "\u2014";
+    const chargeCurrentA = this._numberState(e4.chargeCurrent);
+    const chargeCurrentEntity = this._entity(e4.chargeCurrent);
+    const allowedCurrents = this._allowedCurrents(chargeCurrentEntity);
+    const currentMin = this._attrNumber(chargeCurrentEntity, "min") ?? this._attrNumber(chargeCurrentEntity, "native_min_value") ?? 6;
+    const currentMax = this._attrNumber(chargeCurrentEntity, "max") ?? this._attrNumber(chargeCurrentEntity, "native_max_value") ?? 16;
+    const currentStep = this._attrNumber(chargeCurrentEntity, "step") ?? this._attrNumber(chargeCurrentEntity, "native_step") ?? 1;
+    const title = this._config?.title ?? "EV Charger";
+    const isWorking = chargeOn || workState.toUpperCase() === "WORKING";
     return b2`
-      <div class="graph-wrap">
-        <svg
-          class="graph"
-          viewBox="0 0 ${width} ${height}"
-          preserveAspectRatio="none"
-          aria-label="Power and surplus graph"
-        >
-          <line x1="0" y1="${zeroY}" x2="${width}" y2="${zeroY}" class="axis"></line>
-          <path d="${powerPath}" class="line power"></path>
-          <path d="${surplusPath}" class="line surplus"></path>
-        </svg>
-        <div class="legend">
-          <span class="leg"><i class="dot power"></i>Grid+EV power</span>
-          <span class="leg"><i class="dot surplus"></i>Effective surplus</span>
+      <div class="dashboard">
+        <!-- Header -->
+        <header class="dash-header">
+          <div>
+            <div class="app-label">KINETIC</div>
+            <div class="dash-title">${title}</div>
+          </div>
+          <div class="chips">
+            <span class="chip ${chargeOn ? "chip-ok" : "chip-off"}">
+              ${chargeOn ? "Charging" : "Idle"}
+            </span>
+            <span class="chip ${surplusOn ? "chip-ok" : "chip-off"}">
+              ${surplusOn ? "Surplus" : "Manual"}
+            </span>
+            ${regulationOn ? b2`<span class="chip chip-ok">Regulating</span>` : A}
+          </div>
+        </header>
+
+        <!-- Hero Gauge -->
+        <section class="gauge-section">
+          ${this._renderGauge(powerW, isWorking)}
+          <!-- Status bar -->
+          <div class="status-bar ${isWorking ? "status-bar--active" : ""}">
+            <span class="status-dot ${isWorking ? "status-dot--pulse" : ""}"></span>
+            <span class="status-label">${workState.toUpperCase()}</span>
+            <div class="status-divider"></div>
+            <span class="mso status-icon">ev_station</span>
+            <span class="status-sub">${surplusOn ? "SOLAR" : "GRID"}</span>
+          </div>
+        </section>
+
+        <!-- Telemetry grid -->
+        <div class="tele-grid">
+          <div class="tele-tile">
+            <span class="mso tele-icon tele-icon--tertiary">bolt</span>
+            <div class="tele-label">Voltage</div>
+            <div class="tele-value">
+              ${voltageV !== null ? voltageV.toFixed(0) : "\u2014"}
+              <span class="tele-unit">V</span>
+            </div>
+          </div>
+          <div class="tele-tile">
+            <span class="mso tele-icon tele-icon--secondary">speed</span>
+            <div class="tele-label">Current</div>
+            <div class="tele-value">
+              ${currentA !== null ? currentA.toFixed(0) : "\u2014"}
+              <span class="tele-unit">A</span>
+            </div>
+          </div>
+          <div class="tele-tile">
+            <span class="mso tele-icon tele-icon--error">thermostat</span>
+            <div class="tele-label">Charger</div>
+            <div class="tele-value">
+              ${tempC !== null ? tempC.toFixed(0) : "\u2014"}
+              <span class="tele-unit">°C</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Actions -->
+        <div class="action-grid">
+          <button
+            class="btn-action btn-pause"
+            @click=${this._onChargeToggle}
+            ?disabled=${!e4.chargeSession}
+          >
+            <span class="mso">${chargeOn ? "pause_circle" : "play_circle"}</span>
+            ${chargeOn ? "Pause Session" : "Start Session"}
+          </button>
+          <button
+            class="btn-action btn-emergency"
+            @click=${this._onReboot}
+            ?disabled=${!e4.reboot}
+          >
+            <span class="mso" style="font-variation-settings:'FILL' 1">emergency_home</span>
+            Emergency Stop
+          </button>
+        </div>
+
+        <!-- Charge current control -->
+        <div class="current-box">
+          <div class="current-label">
+            <span class="mso" style="font-size:1rem;color:var(--kin-primary)">current_ac</span>
+            Charge current
+          </div>
+          <div class="current-ctrl">
+            <button
+              class="btn-step"
+              @click=${() => {
+      const t3 = this._stepCurrent(-1, chargeCurrentA, allowedCurrents, currentMin, currentMax, currentStep);
+      this._setChargeCurrent(t3, currentMin, currentMax, allowedCurrents);
+    }}
+              ?disabled=${!e4.chargeCurrent}
+            >−</button>
+            <div class="current-val">${this._formatAmp(chargeCurrentA)}</div>
+            <button
+              class="btn-step"
+              @click=${() => {
+      const t3 = this._stepCurrent(1, chargeCurrentA, allowedCurrents, currentMin, currentMax, currentStep);
+      this._setChargeCurrent(t3, currentMin, currentMax, allowedCurrents);
+    }}
+              ?disabled=${!e4.chargeCurrent}
+            >+</button>
+          </div>
         </div>
       </div>
     `;
   }
-  _metric(label, value) {
-    return b2`<div class="metric"><span>${label}</span><strong>${value}</strong></div>`;
+  _renderGauge(powerW, active) {
+    const pct = powerW !== null ? Math.max(0, Math.min(1, powerW / GAUGE_MAX_W)) : 0;
+    const fill = pct * GAUGE_CIRC;
+    const displayKw = powerW !== null ? (powerW / 1e3).toFixed(2) : "\u2014";
+    const unit = powerW !== null ? "kW" : "";
+    return b2`
+      <div class="gauge-wrap">
+        <svg class="gauge-svg" viewBox="0 0 100 100" aria-label="Power gauge">
+          <!-- Track -->
+          <circle
+            cx="50" cy="50" r="${GAUGE_R}"
+            fill="none" stroke="#20201f" stroke-width="8"
+          />
+          <!-- Arc -->
+          <circle
+            cx="50" cy="50" r="${GAUGE_R}"
+            fill="none"
+            stroke="var(--kin-primary)"
+            stroke-width="8"
+            stroke-linecap="round"
+            stroke-dasharray="${fill.toFixed(2)} ${GAUGE_CIRC.toFixed(2)}"
+            transform="rotate(-90 50 50)"
+            class="${active ? "gauge-arc--glow" : ""}"
+          />
+        </svg>
+        <div class="gauge-center">
+          <div class="gauge-sublabel">Power Output</div>
+          <div class="gauge-value">${displayKw}</div>
+          <div class="gauge-unit">${unit}</div>
+        </div>
+      </div>
+    `;
   }
-  _debugValue(label, value) {
-    return b2`<div class="debug-item"><span>${label}</span><strong>${value}</strong></div>`;
+  /* ─── Strategy ───────────────────────────────────────────────────────── */
+  _renderStrategy() {
+    const e4 = this._resolvedEntities;
+    const surplusOn = this._isOn(e4.surplusMode);
+    const profile = this._state(e4.surplusProfile) ?? "balanced";
+    const startW = this._sliderValues[e4.surplusStartThreshold ?? ""] ?? this._numberState(e4.surplusStartThreshold) ?? 1600;
+    const stopW = this._sliderValues[e4.surplusStopThreshold ?? ""] ?? this._numberState(e4.surplusStopThreshold) ?? 1200;
+    const startPct = (startW / THRESHOLD_MAX_W * 100).toFixed(1);
+    const stopPct = (stopW / THRESHOLD_MAX_W * 100).toFixed(1);
+    const lastDecision = this._state(e4.lastDecision) ?? "\u2014";
+    const targetA = this._numberState(e4.surplusTargetCurrent);
+    return b2`
+      <div class="strategy">
+        <header class="page-header">
+          <div class="page-sup">Energy Management</div>
+          <div class="page-title">Surplus Strategy</div>
+        </header>
+
+        <!-- Surplus mode toggle -->
+        <section class="strat-section">
+          <div class="strat-row">
+            <div class="strat-row-left">
+              <span class="mso strat-icon">solar_power</span>
+              <div>
+                <div class="strat-row-title">Surplus Mode</div>
+                <div class="strat-row-sub">Solar regulation active</div>
+              </div>
+            </div>
+            <button
+              class="toggle ${surplusOn ? "toggle--on" : ""}"
+              @click=${this._onSurplusToggle}
+              ?disabled=${!e4.surplusMode}
+              aria-label="Toggle surplus mode"
+            >
+              <div class="toggle-thumb"></div>
+            </button>
+          </div>
+        </section>
+
+        <!-- Profile selector -->
+        <section class="strat-section">
+          <div class="strat-section-label">Strategy Profile</div>
+          <div class="profile-grid">
+            ${PROFILE_OPTIONS.map((p3) => {
+      const m2 = PROFILE_META[p3];
+      const active = profile === p3;
+      return b2`
+                <button
+                  class="profile-btn ${active ? "profile-btn--active" : ""}"
+                  @click=${() => this._setProfile(p3)}
+                  ?disabled=${!e4.surplusProfile}
+                >
+                  <span class="mso profile-icon">${m2.icon}</span>
+                  <span class="profile-name">${m2.label}</span>
+                  <span class="profile-thresholds">${m2.start}/${m2.stop}W</span>
+                </button>
+              `;
+    })}
+          </div>
+        </section>
+
+        <!-- Thresholds -->
+        <section class="strat-section">
+          <div class="strat-section-label">Power Thresholds</div>
+
+          <!-- Start threshold -->
+          <div class="threshold-block">
+            <div class="threshold-header">
+              <div>
+                <div class="threshold-label">Start Threshold</div>
+                <div class="threshold-value">
+                  ${startW}<span class="threshold-unit">W</span>
+                </div>
+              </div>
+              <div class="threshold-right-label">Surplus Power</div>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="${THRESHOLD_MAX_W}"
+              step="${THRESHOLD_STEP_W}"
+              .value=${String(startW)}
+              style="--pct: ${startPct}%"
+              @input=${(ev) => this._onThresholdInput(e4.surplusStartThreshold, ev)}
+              @change=${(ev) => this._onThresholdChange(e4.surplusStartThreshold, ev)}
+              ?disabled=${!e4.surplusStartThreshold}
+              class="slider slider--primary"
+            />
+          </div>
+
+          <!-- Stop threshold -->
+          <div class="threshold-block">
+            <div class="threshold-header">
+              <div>
+                <div class="threshold-label">Stop Threshold</div>
+                <div class="threshold-value threshold-value--stop">
+                  ${stopW}<span class="threshold-unit">W</span>
+                </div>
+              </div>
+              <div class="threshold-right-label">Grid Draw</div>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="${THRESHOLD_MAX_W}"
+              step="${THRESHOLD_STEP_W}"
+              .value=${String(stopW)}
+              style="--pct: ${stopPct}%"
+              @input=${(ev) => this._onThresholdInput(e4.surplusStopThreshold, ev)}
+              @change=${(ev) => this._onThresholdChange(e4.surplusStopThreshold, ev)}
+              ?disabled=${!e4.surplusStopThreshold}
+              class="slider slider--error"
+            />
+          </div>
+        </section>
+
+        <!-- Live status -->
+        <section class="strat-section">
+          <div class="strat-section-label">Live Status</div>
+          <div class="live-grid">
+            <div class="live-item">
+              <div class="live-item-label">Target Current</div>
+              <div class="live-item-value">${this._formatAmp(targetA)}</div>
+            </div>
+            <div class="live-item">
+              <div class="live-item-label">Last Decision</div>
+              <div class="live-item-value live-item-value--decision">${lastDecision}</div>
+            </div>
+          </div>
+        </section>
+      </div>
+    `;
   }
-  _resolveConfiguredEntities(config) {
-    const token = this._normalizeToken(config.charger_name);
-    const configured = config.entities ?? {};
-    const fallback = (domain, suffix) => token ? `${domain}.${token}_${suffix}` : void 0;
-    return {
-      power: configured.power ?? fallback("sensor", "power_l1"),
-      current: configured.current ?? fallback("sensor", "current_l1"),
-      chargeCurrent: configured.charge_current ?? fallback("number", "charge_current"),
-      chargeSession: configured.charge_session ?? fallback("switch", "charge_session"),
-      surplusMode: configured.surplus_mode ?? fallback("switch", "surplus_mode"),
-      surplusProfile: configured.surplus_profile ?? fallback("select", "surplus_profile"),
-      regulationActive: configured.regulation_active ?? fallback("binary_sensor", "surplus_regulation_active"),
-      lastDecision: configured.last_decision ?? fallback("sensor", "surplus_last_decision_reason"),
-      surplusRaw: configured.surplus_raw ?? fallback("sensor", "surplus_raw_w"),
-      surplusEffective: configured.surplus_effective ?? fallback("sensor", "surplus_effective_w"),
-      surplusDischargeOverLimit: configured.surplus_discharge_over_limit ?? fallback("sensor", "surplus_battery_discharge_over_limit_w"),
-      surplusTargetCurrent: configured.surplus_target_current ?? fallback("sensor", "surplus_target_current_a")
-    };
+  /* ─── Logs ───────────────────────────────────────────────────────────── */
+  _renderLogs() {
+    const e4 = this._resolvedEntities;
+    const selftest = this._state(e4.selftest) ?? "\u2014";
+    const alarm = this._state(e4.alarm) ?? "\u2014";
+    const lastDecision = this._state(e4.lastDecision) ?? "\u2014";
+    const surplusRawW = this._powerW(e4.surplusRaw);
+    const surplusEffectiveW = this._powerW(e4.surplusEffective);
+    const selftestOk = selftest.toUpperCase().includes("OK") || selftest.toUpperCase().includes("PASS") || selftest === "\u2014";
+    const alarmOk = alarm === "\u2014" || alarm === "" || alarm === "0" || alarm.toUpperCase() === "NONE" || alarm.toUpperCase() === "OK";
+    return b2`
+      <div class="logs">
+        <header class="page-header">
+          <div class="page-sup">Monitoring</div>
+          <div class="page-title">Charge Logs</div>
+        </header>
+
+        <!-- Graph -->
+        <section class="logs-section">
+          <div class="logs-section-label">Last Hour — Power &amp; Surplus</div>
+          ${this._renderGraph()}
+        </section>
+
+        <!-- Diagnostics -->
+        <section class="logs-section">
+          <div class="logs-section-label">Diagnostics</div>
+          <div class="diag-row">
+            <div class="diag-card">
+              <div class="diag-icon-wrap ${selftestOk ? "diag-icon-wrap--ok" : "diag-icon-wrap--warn"}">
+                <span class="mso">${selftestOk ? "health_and_safety" : "warning"}</span>
+              </div>
+              <div>
+                <div class="diag-label">Self-Test</div>
+                <div class="diag-value">${selftest.toUpperCase()}</div>
+              </div>
+            </div>
+            <div class="diag-card">
+              <div class="diag-icon-wrap ${alarmOk ? "" : "diag-icon-wrap--warn"}">
+                <span class="mso">${alarmOk ? "notifications_off" : "notification_important"}</span>
+              </div>
+              <div>
+                <div class="diag-label">Alarms</div>
+                <div class="diag-value">${alarmOk ? "NONE ACTIVE" : alarm.toUpperCase()}</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Surplus debug -->
+        <section class="logs-section">
+          <div class="logs-section-label">Surplus Debug</div>
+          <div class="debug-grid">
+            <div class="debug-item">
+              <div class="debug-item-label">Raw surplus</div>
+              <div class="debug-item-value">${this._formatPower(surplusRawW)}</div>
+            </div>
+            <div class="debug-item">
+              <div class="debug-item-label">Effective surplus</div>
+              <div class="debug-item-value">${this._formatPower(surplusEffectiveW)}</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Terminal log -->
+        <section class="logs-section">
+          <div class="logs-section-label">Decision Log</div>
+          <div class="terminal">
+            <div class="terminal-icon-bg">
+              <span class="mso">terminal</span>
+            </div>
+            <div class="terminal-line">
+              <span class="terminal-ts">${this._nowHMS()}</span>
+              <span class="terminal-tag terminal-tag--active">LIVE</span>
+              <span class="terminal-msg">${lastDecision}</span>
+            </div>
+            <div class="terminal-footer">
+              <div class="terminal-live">
+                <span class="terminal-live-dot"></span>
+                <span>Live Monitoring Active</span>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    `;
   }
-  _stateSignature() {
-    if (!this.hass) {
-      return "no-hass";
+  /* ─── Graph (1h history) ─────────────────────────────────────────────── */
+  _renderGraph() {
+    const points = this._graphHistory;
+    if (points.length < 2) {
+      return b2`
+        <div class="graph-empty">
+          ${this._graphHistoryLoading ? "Loading history\u2026" : "Collecting samples\u2026"}
+        </div>
+      `;
     }
-    const trackedIds = this._trackedEntityIds();
-    if (!trackedIds.length) {
-      return "no-tracked-entities";
-    }
-    const parts = [];
-    for (const entityId of trackedIds) {
-      const entity = this.hass.states[entityId];
-      if (!entity) {
-        parts.push(`${entityId}:missing`);
-        continue;
-      }
-      parts.push(`${entityId}:${entity.state}`);
-      if (entityId === this._resolvedEntities.chargeCurrent) {
-        const attributes = entity.attributes;
-        const rawAllowed = attributes.allowed_currents ?? attributes.available_currents ?? attributes.adjust_current_options ?? "";
-        const allowed = Array.isArray(rawAllowed) ? rawAllowed.join(",") : String(rawAllowed);
-        const min = attributes.min ?? attributes.native_min_value ?? "";
-        const max = attributes.max ?? attributes.native_max_value ?? "";
-        const step = attributes.step ?? attributes.native_step ?? "";
-        parts.push(`charge_meta:${allowed}|${min}|${max}|${step}`);
-      }
-    }
-    return parts.join(";");
-  }
-  _trackedEntityIds() {
-    const all = [
-      this._resolvedEntities.power,
-      this._resolvedEntities.current,
-      this._resolvedEntities.chargeCurrent,
-      this._resolvedEntities.chargeSession,
-      this._resolvedEntities.surplusMode,
-      this._resolvedEntities.surplusProfile,
-      this._resolvedEntities.regulationActive,
-      this._resolvedEntities.lastDecision,
-      this._resolvedEntities.surplusRaw,
-      this._resolvedEntities.surplusEffective,
-      this._resolvedEntities.surplusDischargeOverLimit,
-      this._resolvedEntities.surplusTargetCurrent
-    ];
-    return [...new Set(all.filter((value) => Boolean(value)))];
-  }
-  _syncOptimisticStatesWithHass() {
-    if (!this.hass) {
-      return;
-    }
-    const entries = Object.entries(this._optimisticStates);
-    if (!entries.length) {
-      return;
-    }
-    let changed = false;
-    const next = { ...this._optimisticStates };
-    for (const [entityId, optimisticState] of entries) {
-      const realState = this.hass.states[entityId]?.state;
-      if (realState === void 0 || realState === optimisticState) {
-        delete next[entityId];
-        const timeout = this._optimisticTimeouts.get(entityId);
-        if (timeout) {
-          clearTimeout(timeout);
-          this._optimisticTimeouts.delete(entityId);
-        }
-        changed = true;
-      }
-    }
-    if (changed) {
-      this._optimisticStates = next;
-    }
-  }
-  _setOptimisticState(entityId, state) {
-    if (!entityId) {
-      return;
-    }
-    const previous = this._optimisticTimeouts.get(entityId);
-    if (previous) {
-      clearTimeout(previous);
-    }
-    this._optimisticStates = {
-      ...this._optimisticStates,
-      [entityId]: state
-    };
-    const timeout = setTimeout(
-      () => this._clearOptimisticState(entityId),
-      OPTIMISTIC_TIMEOUT_MS
+    const width = 360;
+    const height = 90;
+    const allValues = points.flatMap(
+      (s4) => [s4.powerW, s4.surplusW].filter((v2) => v2 !== null)
     );
-    this._optimisticTimeouts.set(entityId, timeout);
+    const maxAbs = Math.max(500, ...allValues.map((v2) => Math.abs(v2)));
+    const min = -maxAbs;
+    const max = maxAbs;
+    const powerPath = this._buildPath(points.map((s4) => s4.powerW), min, max, width, height);
+    const surplusPath = this._buildPath(points.map((s4) => s4.surplusW), min, max, width, height);
+    const zeroY = this._scaleY(0, min, max, height);
+    return b2`
+      <div class="graph-wrap">
+        <svg class="graph-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="Power graph">
+          <line x1="0" y1="${zeroY}" x2="${width}" y2="${zeroY}" class="graph-axis"></line>
+          <path d="${powerPath}" class="graph-line graph-line--power"></path>
+          <path d="${surplusPath}" class="graph-line graph-line--surplus"></path>
+        </svg>
+        <div class="graph-legend">
+          <span class="legend-item">
+            <i class="legend-dot legend-dot--power"></i>Power
+          </span>
+          <span class="legend-item">
+            <i class="legend-dot legend-dot--surplus"></i>Eff. Surplus
+          </span>
+        </div>
+      </div>
+    `;
   }
-  _clearOptimisticState(entityId) {
-    if (!entityId || !(entityId in this._optimisticStates)) {
-      return;
-    }
-    const next = { ...this._optimisticStates };
-    delete next[entityId];
-    this._optimisticStates = next;
-    const timeout = this._optimisticTimeouts.get(entityId);
-    if (timeout) {
-      clearTimeout(timeout);
-      this._optimisticTimeouts.delete(entityId);
-    }
+  /* ─── Bottom nav ─────────────────────────────────────────────────────── */
+  _renderNav() {
+    const tabs = [
+      { id: "dashboard", icon: "speed", label: "Dashboard" },
+      { id: "strategy", icon: "settings_suggest", label: "Strategy" },
+      { id: "logs", icon: "history", label: "Logs" }
+    ];
+    return b2`
+      <nav class="bottom-nav">
+        ${tabs.map(
+      (t3) => b2`
+            <button
+              class="nav-item ${this._activeTab === t3.id ? "nav-item--active" : ""}"
+              @click=${() => {
+        this._activeTab = t3.id;
+      }}
+            >
+              <span class="mso nav-icon">${t3.icon}</span>
+              <span class="nav-label">${t3.label}</span>
+            </button>
+          `
+    )}
+      </nav>
+    `;
   }
-  _clearAllOptimisticStates() {
-    if (!Object.keys(this._optimisticStates).length && this._optimisticTimeouts.size === 0) {
-      return;
-    }
-    for (const timeout of this._optimisticTimeouts.values()) {
-      clearTimeout(timeout);
-    }
-    this._optimisticTimeouts.clear();
-    this._optimisticStates = {};
-  }
-  _normalizeToken(input) {
-    return String(input ?? "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "_");
-  }
+  /* ─── Graph data / history ───────────────────────────────────────────── */
   _appendGraphSample() {
-    if (!this.hass) {
-      return false;
-    }
+    if (!this.hass) return false;
     const now = Date.now();
-    const lastSample = this._graphHistory[this._graphHistory.length - 1];
-    if (lastSample && now - lastSample.ts < GRAPH_SAMPLE_INTERVAL_MS) {
-      return false;
-    }
+    const last = this._graphHistory[this._graphHistory.length - 1];
+    if (last && now - last.ts < GRAPH_SAMPLE_INTERVAL_MS) return false;
     const powerW = this._powerW(this._resolvedEntities.power);
     const surplusW = this._powerW(this._resolvedEntities.surplusEffective);
     const next = { ts: now, powerW, surplusW };
-    const cutoffTs = now - GRAPH_WINDOW_MS;
-    const history = [...this._graphHistory, next].filter((sample) => sample.ts >= cutoffTs).slice(-GRAPH_MAX_POINTS);
-    this._graphHistory = history;
+    const cutoff = now - GRAPH_WINDOW_MS;
+    this._graphHistory = [...this._graphHistory, next].filter((s4) => s4.ts >= cutoff).slice(-GRAPH_MAX_POINTS);
     return true;
   }
   _graphHydrationKey() {
-    return [this._resolvedEntities.power, this._resolvedEntities.surplusEffective].filter((value) => Boolean(value)).join("|");
+    return [this._resolvedEntities.power, this._resolvedEntities.surplusEffective].filter((v2) => Boolean(v2)).join("|");
   }
   _maybeHydrateGraphHistory() {
     const key = this._graphHydrationKey();
-    if (!this.hass || !this.hass.callApi || !key) {
-      return;
-    }
-    if (this._graphHistoryFetchInFlight) {
-      return;
-    }
-    if (this._graphHistoryHydratedKey === key && this._graphHistory.length >= 2) {
-      return;
-    }
-    if (this._graphHistoryLastFailedAt > 0 && Date.now() - this._graphHistoryLastFailedAt < GRAPH_HISTORY_RETRY_MS) {
-      return;
-    }
+    if (!this.hass?.callApi || !key) return;
+    if (this._graphHistoryFetchInFlight) return;
+    if (this._graphHistoryHydratedKey === key && this._graphHistory.length >= 2) return;
+    if (this._graphHistoryLastFailedAt > 0 && Date.now() - this._graphHistoryLastFailedAt < GRAPH_HISTORY_RETRY_MS) return;
     void this._hydrateGraphHistory(key);
   }
   async _hydrateGraphHistory(key) {
-    if (!this.hass || !this.hass.callApi) {
-      return;
-    }
+    if (!this.hass?.callApi) return;
     const entityIds = [
       this._resolvedEntities.power,
       this._resolvedEntities.surplusEffective
-    ].filter((value) => Boolean(value));
-    if (!entityIds.length) {
-      return;
-    }
+    ].filter((v2) => Boolean(v2));
+    if (!entityIds.length) return;
     this._graphHistoryFetchInFlight = true;
     this._graphHistoryLoading = true;
     const endTs = Date.now();
@@ -1033,9 +1145,7 @@ var TuyaEvChargerCard = class extends i4 {
     const path = `history/period/${startIso}?filter_entity_id=${filterEntityId}&end_time=${endIso}&significant_changes_only=0`;
     try {
       const payload = await this.hass.callApi("GET", path);
-      if (key !== this._graphHydrationKey()) {
-        return;
-      }
+      if (key !== this._graphHydrationKey()) return;
       const merged = this._buildHistoryGraphSamples(payload, startTs, endTs);
       this._graphHistoryHydratedKey = key;
       if (merged.length) {
@@ -1059,53 +1169,40 @@ var TuyaEvChargerCard = class extends i4 {
       grouped.get(this._resolvedEntities.surplusEffective ?? "") ?? [],
       this._resolvedEntities.surplusEffective
     );
-    if (!powerSeries.length && !surplusSeries.length) {
-      return [];
-    }
-    const alignedStartTs = Math.floor(startTs / GRAPH_SAMPLE_INTERVAL_MS) * GRAPH_SAMPLE_INTERVAL_MS;
+    if (!powerSeries.length && !surplusSeries.length) return [];
+    const alignedStart = Math.floor(startTs / GRAPH_SAMPLE_INTERVAL_MS) * GRAPH_SAMPLE_INTERVAL_MS;
     const points = [];
-    let powerIndex = 0;
-    let surplusIndex = 0;
+    let pi = 0, si = 0;
     let powerValue = null;
     let surplusValue = null;
-    for (let ts = alignedStartTs; ts <= endTs; ts += GRAPH_SAMPLE_INTERVAL_MS) {
-      while (powerIndex < powerSeries.length && powerSeries[powerIndex].ts <= ts) {
-        powerValue = powerSeries[powerIndex].valueW;
-        powerIndex += 1;
+    for (let ts = alignedStart; ts <= endTs; ts += GRAPH_SAMPLE_INTERVAL_MS) {
+      while (pi < powerSeries.length && powerSeries[pi].ts <= ts) {
+        powerValue = powerSeries[pi].valueW;
+        pi++;
       }
-      while (surplusIndex < surplusSeries.length && surplusSeries[surplusIndex].ts <= ts) {
-        surplusValue = surplusSeries[surplusIndex].valueW;
-        surplusIndex += 1;
+      while (si < surplusSeries.length && surplusSeries[si].ts <= ts) {
+        surplusValue = surplusSeries[si].valueW;
+        si++;
       }
       points.push({ ts, powerW: powerValue, surplusW: surplusValue });
     }
-    return points.filter((sample) => sample.powerW !== null || sample.surplusW !== null).slice(-GRAPH_MAX_POINTS);
+    return points.filter((s4) => s4.powerW !== null || s4.surplusW !== null).slice(-GRAPH_MAX_POINTS);
   }
   _historyByEntity(payload) {
     const grouped = /* @__PURE__ */ new Map();
-    if (!Array.isArray(payload)) {
-      return grouped;
-    }
+    if (!Array.isArray(payload)) return grouped;
     for (const rawSeries of payload) {
-      if (!Array.isArray(rawSeries)) {
-        continue;
-      }
-      let fallbackEntityId = "";
+      if (!Array.isArray(rawSeries)) continue;
+      let fallback = "";
       for (const rawState of rawSeries) {
-        if (!rawState || typeof rawState !== "object") {
-          continue;
-        }
+        if (!rawState || typeof rawState !== "object") continue;
         const state = rawState;
-        const entityIdRaw = state.entity_id;
-        if (typeof entityIdRaw === "string" && entityIdRaw.trim()) {
-          fallbackEntityId = entityIdRaw.trim();
-        }
-        if (!fallbackEntityId) {
-          continue;
-        }
-        const list = grouped.get(fallbackEntityId) ?? [];
+        const id = state.entity_id;
+        if (typeof id === "string" && id.trim()) fallback = id.trim();
+        if (!fallback) continue;
+        const list = grouped.get(fallback) ?? [];
         list.push(state);
-        grouped.set(fallbackEntityId, list);
+        grouped.set(fallback, list);
       }
     }
     return grouped;
@@ -1114,631 +1211,1305 @@ var TuyaEvChargerCard = class extends i4 {
     const unit = this._entityPowerUnit(entityId);
     const series = [];
     for (const row of history) {
-      const ts = this._historyTimestamp(row);
-      if (ts === null) {
+      const rawTs = row.last_changed ?? row.last_updated;
+      if (typeof rawTs !== "string") continue;
+      const ts = Date.parse(rawTs);
+      if (!Number.isFinite(ts)) continue;
+      const raw = String(row.state ?? "").trim().toLowerCase();
+      if (!raw || raw === "unknown" || raw === "unavailable" || raw === "none") {
+        series.push({ ts, valueW: null });
         continue;
       }
-      const value = this._historyPowerValue(row.state);
-      const valueW = value === null ? null : this._convertPowerToWatts(value, unit);
+      const parsed = Number(row.state);
+      const valueW = Number.isFinite(parsed) ? this._convertPowerToWatts(parsed, unit) : null;
       series.push({ ts, valueW });
     }
     series.sort((a3, b3) => a3.ts - b3.ts);
     return series;
   }
-  _historyTimestamp(row) {
-    const rawTimestamp = row.last_changed ?? row.last_updated;
-    if (typeof rawTimestamp !== "string") {
-      return null;
-    }
-    const parsed = Date.parse(rawTimestamp);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  _historyPowerValue(value) {
-    if (value === null || value === void 0) {
-      return null;
-    }
-    const raw = String(value).trim().toLowerCase();
-    if (!raw || raw === "unknown" || raw === "unavailable" || raw === "none") {
-      return null;
-    }
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
   _buildPath(values, min, max, width, height) {
     const step = width / Math.max(1, values.length - 1);
     let path = "";
-    values.forEach((value, i5) => {
-      if (value === null) {
-        return;
-      }
+    values.forEach((v2, i5) => {
+      if (v2 === null) return;
       const x2 = i5 * step;
-      const y3 = this._scaleY(value, min, max, height);
+      const y3 = this._scaleY(v2, min, max, height);
       path += path ? ` L ${x2.toFixed(2)} ${y3.toFixed(2)}` : `M ${x2.toFixed(2)} ${y3.toFixed(2)}`;
     });
     return path;
   }
-  _scaleY(value, min, max, height) {
-    if (max <= min) {
-      return height / 2;
-    }
-    const ratio = (value - min) / (max - min);
-    return height - ratio * height;
+  _scaleY(v2, min, max, height) {
+    if (max <= min) return height / 2;
+    return height - (v2 - min) / (max - min) * height;
   }
-  _entity(entityId) {
-    if (!entityId || !this.hass) {
-      return void 0;
-    }
-    return this.hass.states[entityId];
+  /* ─── Entity accessors ───────────────────────────────────────────────── */
+  _entity(id) {
+    if (!id || !this.hass) return void 0;
+    return this.hass.states[id];
   }
-  _state(entityId) {
-    if (!entityId) {
-      return void 0;
-    }
-    const optimisticState = this._optimisticStates[entityId];
-    if (optimisticState !== void 0) {
-      return optimisticState;
-    }
-    return this._entity(entityId)?.state;
+  _state(id) {
+    if (!id) return void 0;
+    const opt = this._optimisticStates[id];
+    if (opt !== void 0) return opt;
+    return this._entity(id)?.state;
   }
-  _isOn(entityId) {
-    return this._state(entityId) === "on";
+  _isOn(id) {
+    return this._state(id) === "on";
   }
-  _numberState(entityId) {
-    const state = this._state(entityId);
-    if (state === void 0 || state === "unknown" || state === "unavailable") {
-      return null;
-    }
-    const parsed = Number(state);
-    return Number.isFinite(parsed) ? parsed : null;
+  _numberState(id) {
+    const s4 = this._state(id);
+    if (s4 === void 0 || s4 === "unknown" || s4 === "unavailable") return null;
+    const n4 = Number(s4);
+    return Number.isFinite(n4) ? n4 : null;
   }
-  _powerW(entityId) {
-    const entity = this._entity(entityId);
-    if (!entity) {
-      return null;
-    }
-    const parsed = this._numberState(entityId);
-    if (parsed === null) {
-      return null;
-    }
-    const unit = this._entityPowerUnit(entityId);
-    return this._convertPowerToWatts(parsed, unit);
+  _powerW(id) {
+    const entity = this._entity(id);
+    if (!entity) return null;
+    const n4 = this._numberState(id);
+    if (n4 === null) return null;
+    return this._convertPowerToWatts(n4, this._entityPowerUnit(id));
   }
-  _entityPowerUnit(entityId) {
-    const entity = this._entity(entityId);
+  _entityPowerUnit(id) {
+    const e4 = this._entity(id);
     return String(
-      entity?.attributes.unit_of_measurement ?? entity?.attributes.native_unit_of_measurement ?? ""
+      e4?.attributes.unit_of_measurement ?? e4?.attributes.native_unit_of_measurement ?? ""
     ).trim().toLowerCase();
   }
-  _convertPowerToWatts(value, unit) {
-    return unit === "kw" ? value * 1e3 : value;
+  _convertPowerToWatts(v2, unit) {
+    return unit === "kw" ? v2 * 1e3 : v2;
   }
   _attrNumber(entity, key) {
-    if (!entity) {
-      return null;
-    }
-    const raw = entity.attributes[key];
-    const parsed = Number(raw);
-    return Number.isFinite(parsed) ? parsed : null;
+    if (!entity) return null;
+    const n4 = Number(entity.attributes[key]);
+    return Number.isFinite(n4) ? n4 : null;
   }
   _allowedCurrents(entity) {
-    if (!entity) {
-      return [];
-    }
-    const rawValues = [
+    if (!entity) return [];
+    const raws = [
       entity.attributes.allowed_currents,
       entity.attributes.available_currents,
       entity.attributes.adjust_current_options
     ];
     const parsed = [];
-    for (const raw of rawValues) {
+    for (const raw of raws) {
       if (Array.isArray(raw)) {
-        for (const value of raw) {
-          const numberValue = Number(value);
-          if (Number.isFinite(numberValue)) {
-            parsed.push(Math.round(numberValue));
-          }
+        for (const v2 of raw) {
+          const n4 = Number(v2);
+          if (Number.isFinite(n4)) parsed.push(Math.round(n4));
         }
-        continue;
-      }
-      if (typeof raw === "string") {
+      } else if (typeof raw === "string") {
         for (const chunk of raw.split(",")) {
-          const numberValue = Number(chunk.trim());
-          if (Number.isFinite(numberValue)) {
-            parsed.push(Math.round(numberValue));
-          }
+          const n4 = Number(chunk.trim());
+          if (Number.isFinite(n4)) parsed.push(Math.round(n4));
         }
       }
     }
-    return [...new Set(parsed)].filter((value) => value > 0).sort((a3, b3) => a3 - b3);
+    return [...new Set(parsed)].filter((v2) => v2 > 0).sort((a3, b3) => a3 - b3);
   }
-  _formatPower(valueW) {
-    if (valueW === null) {
-      return "--";
-    }
-    const abs = Math.abs(valueW);
-    if (abs >= 1e3) {
-      return `${(valueW / 1e3).toFixed(2)} kW`;
-    }
-    return `${Math.round(valueW)} W`;
+  /* ─── Formatters ─────────────────────────────────────────────────────── */
+  _formatPower(w2) {
+    if (w2 === null) return "\u2014";
+    const abs = Math.abs(w2);
+    return abs >= 1e3 ? `${(w2 / 1e3).toFixed(2)} kW` : `${Math.round(w2)} W`;
   }
-  _formatAmp(valueA) {
-    if (valueA === null) {
-      return "--";
-    }
-    return `${Math.round(valueA)} A`;
+  _formatAmp(a3) {
+    if (a3 === null) return "\u2014";
+    return `${Math.round(a3)} A`;
   }
-  async _onChargeSessionToggle() {
-    if (!this.hass || !this._resolvedEntities.chargeSession) {
-      return;
+  _nowHMS() {
+    return (/* @__PURE__ */ new Date()).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+  /* ─── State signature ────────────────────────────────────────────────── */
+  _stateSignature() {
+    if (!this.hass) return "no-hass";
+    const ids = this._trackedEntityIds();
+    if (!ids.length) return "no-entities";
+    return ids.map((id) => {
+      const e4 = this.hass.states[id];
+      if (!e4) return `${id}:missing`;
+      return `${id}:${e4.state}`;
+    }).join(";");
+  }
+  _trackedEntityIds() {
+    const r4 = this._resolvedEntities;
+    const all = [
+      r4.power,
+      r4.current,
+      r4.voltage,
+      r4.temperature,
+      r4.workState,
+      r4.chargeCurrent,
+      r4.chargeSession,
+      r4.reboot,
+      r4.surplusMode,
+      r4.surplusProfile,
+      r4.surplusStartThreshold,
+      r4.surplusStopThreshold,
+      r4.regulationActive,
+      r4.lastDecision,
+      r4.surplusRaw,
+      r4.surplusEffective,
+      r4.surplusDischargeOverLimit,
+      r4.surplusTargetCurrent,
+      r4.selftest,
+      r4.alarm
+    ];
+    return [...new Set(all.filter((v2) => Boolean(v2)))];
+  }
+  /* ─── Entity resolution ──────────────────────────────────────────────── */
+  _resolveEntities(config) {
+    const token = this._normalizeToken(config.charger_name);
+    const c4 = config.entities ?? {};
+    const fb = (domain, suffix) => token ? `${domain}.${token}_${suffix}` : void 0;
+    const byRole = this._discoverByRole();
+    return {
+      power: c4.power ?? byRole.power ?? fb("sensor", "power_l1"),
+      current: c4.current ?? byRole.current ?? fb("sensor", "current_l1"),
+      voltage: c4.voltage ?? fb("sensor", "voltage_l1"),
+      temperature: c4.temperature ?? fb("sensor", "temperature"),
+      workState: c4.work_state ?? fb("sensor", "work_state"),
+      chargeCurrent: c4.charge_current ?? byRole.chargeCurrent ?? fb("number", "charge_current"),
+      chargeSession: c4.charge_session ?? byRole.chargeSession ?? fb("switch", "charge_session"),
+      reboot: c4.reboot ?? fb("button", "reboot_charger"),
+      surplusMode: c4.surplus_mode ?? byRole.surplusMode ?? fb("switch", "surplus_mode"),
+      surplusProfile: c4.surplus_profile ?? byRole.surplusProfile ?? fb("select", "surplus_profile"),
+      surplusStartThreshold: c4.surplus_start_threshold ?? fb("number", "surplus_start_threshold_w"),
+      surplusStopThreshold: c4.surplus_stop_threshold ?? fb("number", "surplus_stop_threshold_w"),
+      regulationActive: c4.regulation_active ?? byRole.regulationActive ?? fb("binary_sensor", "surplus_regulation_active"),
+      lastDecision: c4.last_decision ?? byRole.lastDecision ?? fb("sensor", "surplus_last_decision_reason"),
+      surplusRaw: c4.surplus_raw ?? byRole.surplusRaw ?? fb("sensor", "surplus_raw_w"),
+      surplusEffective: c4.surplus_effective ?? byRole.surplusEffective ?? fb("sensor", "surplus_effective_w"),
+      surplusDischargeOverLimit: c4.surplus_discharge_over_limit ?? byRole.surplusDischargeOverLimit ?? fb("sensor", "surplus_battery_discharge_over_limit_w"),
+      surplusTargetCurrent: c4.surplus_target_current ?? byRole.surplusTargetCurrent ?? fb("sensor", "surplus_target_current_a"),
+      selftest: c4.selftest ?? fb("sensor", "selftest"),
+      alarm: c4.alarm ?? fb("sensor", "alarm")
+    };
+  }
+  _discoverByRole() {
+    if (!this.hass) return {};
+    const result = {};
+    for (const [entityId, entity] of Object.entries(this.hass.states)) {
+      const role = entity.attributes[ATTR_CARD_ROLE];
+      if (!role) continue;
+      switch (role) {
+        case "power":
+          result.power = entityId;
+          break;
+        case "current":
+          result.current = entityId;
+          break;
+        case "charge_current":
+          result.chargeCurrent = entityId;
+          break;
+        case "charge_session":
+          result.chargeSession = entityId;
+          break;
+        case "surplus_mode":
+          result.surplusMode = entityId;
+          break;
+        case "surplus_profile":
+          result.surplusProfile = entityId;
+          break;
+        case "regulation_active":
+          result.regulationActive = entityId;
+          break;
+        case "last_decision":
+          result.lastDecision = entityId;
+          break;
+        case "surplus_raw":
+          result.surplusRaw = entityId;
+          break;
+        case "surplus_effective":
+          result.surplusEffective = entityId;
+          break;
+        case "surplus_discharge_over_limit":
+          result.surplusDischargeOverLimit = entityId;
+          break;
+        case "surplus_target_current":
+          result.surplusTargetCurrent = entityId;
+          break;
+      }
     }
-    const entityId = this._resolvedEntities.chargeSession;
-    const nextState = this._isOn(entityId) ? "off" : "on";
-    const service = nextState === "on" ? "turn_on" : "turn_off";
-    this._setOptimisticState(entityId, nextState);
+    return result;
+  }
+  _normalizeToken(input) {
+    return String(input ?? "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "_");
+  }
+  /* ─── Optimistic states ──────────────────────────────────────────────── */
+  _syncOptimisticStatesWithHass() {
+    if (!this.hass) return;
+    const entries = Object.entries(this._optimisticStates);
+    if (!entries.length) return;
+    let changed = false;
+    const next = { ...this._optimisticStates };
+    for (const [id, opt] of entries) {
+      const real = this.hass.states[id]?.state;
+      if (real === void 0 || real === opt) {
+        delete next[id];
+        const t3 = this._optimisticTimeouts.get(id);
+        if (t3) {
+          clearTimeout(t3);
+          this._optimisticTimeouts.delete(id);
+        }
+        changed = true;
+      }
+    }
+    if (changed) this._optimisticStates = next;
+  }
+  _setOptimisticState(id, state) {
+    if (!id) return;
+    const prev = this._optimisticTimeouts.get(id);
+    if (prev) clearTimeout(prev);
+    this._optimisticStates = { ...this._optimisticStates, [id]: state };
+    const t3 = setTimeout(() => this._clearOptimisticState(id), OPTIMISTIC_TIMEOUT_MS);
+    this._optimisticTimeouts.set(id, t3);
+  }
+  _clearOptimisticState(id) {
+    if (!id || !(id in this._optimisticStates)) return;
+    const next = { ...this._optimisticStates };
+    delete next[id];
+    this._optimisticStates = next;
+    const t3 = this._optimisticTimeouts.get(id);
+    if (t3) {
+      clearTimeout(t3);
+      this._optimisticTimeouts.delete(id);
+    }
+  }
+  _clearAllOptimisticStates() {
+    for (const t3 of this._optimisticTimeouts.values()) clearTimeout(t3);
+    this._optimisticTimeouts.clear();
+    this._optimisticStates = {};
+  }
+  /* ─── Action handlers ────────────────────────────────────────────────── */
+  async _onChargeToggle() {
+    const id = this._resolvedEntities.chargeSession;
+    if (!this.hass || !id) return;
+    const next = this._isOn(id) ? "off" : "on";
+    this._setOptimisticState(id, next);
     try {
-      await this.hass.callService("switch", service, { entity_id: entityId });
+      await this.hass.callService("switch", next === "on" ? "turn_on" : "turn_off", { entity_id: id });
     } catch {
-      this._clearOptimisticState(entityId);
+      this._clearOptimisticState(id);
     }
   }
-  async _onSurplusModeToggle() {
-    if (!this.hass || !this._resolvedEntities.surplusMode) {
-      return;
-    }
-    const entityId = this._resolvedEntities.surplusMode;
-    const nextState = this._isOn(entityId) ? "off" : "on";
-    const service = nextState === "on" ? "turn_on" : "turn_off";
-    this._setOptimisticState(entityId, nextState);
+  async _onSurplusToggle() {
+    const id = this._resolvedEntities.surplusMode;
+    if (!this.hass || !id) return;
+    const next = this._isOn(id) ? "off" : "on";
+    this._setOptimisticState(id, next);
     try {
-      await this.hass.callService("switch", service, { entity_id: entityId });
+      await this.hass.callService("switch", next === "on" ? "turn_on" : "turn_off", { entity_id: id });
     } catch {
-      this._clearOptimisticState(entityId);
+      this._clearOptimisticState(id);
+    }
+  }
+  async _onReboot() {
+    const id = this._resolvedEntities.reboot;
+    if (!this.hass || !id) return;
+    try {
+      await this.hass.callService("button", "press", { entity_id: id });
+    } catch {
     }
   }
   async _setProfile(option) {
-    if (!this.hass || !this._resolvedEntities.surplusProfile) {
-      return;
-    }
-    const entityId = this._resolvedEntities.surplusProfile;
-    this._setOptimisticState(entityId, option);
+    const id = this._resolvedEntities.surplusProfile;
+    if (!this.hass || !id) return;
+    this._setOptimisticState(id, option);
     try {
-      await this.hass.callService("select", "select_option", {
-        entity_id: entityId,
-        option
-      });
+      await this.hass.callService("select", "select_option", { entity_id: id, option });
+    } catch {
+      this._clearOptimisticState(id);
+    }
+  }
+  _onThresholdInput(entityId, ev) {
+    if (!entityId) return;
+    const value = parseInt(ev.target.value, 10);
+    this._sliderValues = { ...this._sliderValues, [entityId]: value };
+  }
+  async _onThresholdChange(entityId, ev) {
+    if (!this.hass || !entityId) return;
+    const value = parseInt(ev.target.value, 10);
+    const next = { ...this._sliderValues };
+    delete next[entityId];
+    this._sliderValues = next;
+    this._setOptimisticState(entityId, String(value));
+    try {
+      await this.hass.callService("number", "set_value", { entity_id: entityId, value });
     } catch {
       this._clearOptimisticState(entityId);
     }
   }
-  async _setChargeCurrent(value, minimum, maximum, allowedCurrents = []) {
-    if (!this.hass || !this._resolvedEntities.chargeCurrent) {
-      return;
-    }
-    const rounded = Math.round(value);
-    const clamped = Math.max(minimum, Math.min(maximum, rounded));
-    const allowed = allowedCurrents.filter(
-      (candidate) => candidate >= minimum && candidate <= maximum
-    );
-    const target = allowed.length > 0 ? allowed.reduce(
-      (best, candidate) => Math.abs(candidate - clamped) < Math.abs(best - clamped) ? candidate : best
-    ) : clamped;
-    const entityId = this._resolvedEntities.chargeCurrent;
-    this._setOptimisticState(entityId, String(target));
+  async _setChargeCurrent(value, minimum, maximum, allowed = []) {
+    const id = this._resolvedEntities.chargeCurrent;
+    if (!this.hass || !id) return;
+    const clamped = Math.max(minimum, Math.min(maximum, Math.round(value)));
+    const target = allowed.length > 0 ? allowed.filter((c4) => c4 >= minimum && c4 <= maximum).reduce((best, c4) => Math.abs(c4 - clamped) < Math.abs(best - clamped) ? c4 : best, clamped) : clamped;
+    this._setOptimisticState(id, String(target));
     try {
-      await this.hass.callService("number", "set_value", {
-        entity_id: entityId,
-        value: target
-      });
+      await this.hass.callService("number", "set_value", { entity_id: id, value: target });
     } catch {
-      this._clearOptimisticState(entityId);
+      this._clearOptimisticState(id);
     }
   }
-  _stepChargeCurrent(direction, currentValue, allowedCurrents, minimum, maximum, step) {
-    const allowed = allowedCurrents.filter((candidate) => candidate >= minimum && candidate <= maximum).sort((a3, b3) => a3 - b3);
-    if (allowed.length > 0) {
-      const current = currentValue ?? allowed[0];
-      if (direction < 0) {
-        for (let index = allowed.length - 1; index >= 0; index -= 1) {
-          if (allowed[index] < current) {
-            return allowed[index];
-          }
+  _stepCurrent(dir, current, allowed, min, max, step) {
+    const filtered = allowed.filter((c4) => c4 >= min && c4 <= max).sort((a3, b3) => a3 - b3);
+    if (filtered.length > 0) {
+      const cur = current ?? filtered[0];
+      if (dir < 0) {
+        for (let i5 = filtered.length - 1; i5 >= 0; i5--) {
+          if (filtered[i5] < cur) return filtered[i5];
         }
-        return allowed[0];
+        return filtered[0];
       }
-      for (const candidate of allowed) {
-        if (candidate > current) {
-          return candidate;
-        }
+      for (const c4 of filtered) {
+        if (c4 > cur) return c4;
       }
-      return allowed[allowed.length - 1];
+      return filtered[filtered.length - 1];
     }
-    const base = currentValue ?? minimum;
-    return base + direction * step;
+    return (current ?? min) + dir * step;
   }
 };
 TuyaEvChargerCard.properties = {
   hass: { attribute: false },
   _config: { attribute: false, state: true },
-  _detailsOpen: { state: true },
-  _debugOpen: { state: true },
+  _activeTab: { state: true },
   _graphHistory: { state: true },
   _graphHistoryLoading: { state: true },
   _resolvedEntities: { state: true },
-  _optimisticStates: { state: true }
+  _optimisticStates: { state: true },
+  _sliderValues: { state: true }
 };
+/* ─── Styles ─────────────────────────────────────────────────────────── */
 TuyaEvChargerCard.styles = i`
+    /* ── Design tokens ── */
     :host {
-      --ev-accent: #2d6a4f;
-      --ev-accent-soft: #d8ede5;
-      --ev-warn: #9c4221;
-      --ev-border: rgba(120, 135, 150, 0.28);
-      --ev-text-muted: var(--secondary-text-color);
-      font-family: "Manrope", "Avenir Next", "Segoe UI", sans-serif;
+      --kin-primary: #8eff71;
+      --kin-on-primary: #0d6100;
+      --kin-secondary: #6bfe9c;
+      --kin-tertiary: #69daff;
+      --kin-error: #ff7351;
+      --kin-surface: #0e0e0e;
+      --kin-surface-low: #131313;
+      --kin-surface-container: #1a1a1a;
+      --kin-surface-high: #20201f;
+      --kin-surface-highest: #262626;
+      --kin-on-surface: #ffffff;
+      --kin-on-variant: #adaaaa;
+      --kin-outline: #484847;
+
+      display: block;
+      font-family: 'Inter', 'Segoe UI', sans-serif;
+      color: var(--kin-on-surface);
     }
 
     ha-card {
-      border-radius: 18px;
-      border: 1px solid var(--ev-border);
-      box-shadow: 0 10px 30px rgba(20, 30, 38, 0.08);
-      background:
-        linear-gradient(150deg, rgba(45, 106, 79, 0.08), transparent 42%),
-        var(--card-background-color);
+      background: var(--kin-surface);
+      border-radius: 20px;
       overflow: hidden;
+      border: none;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
     }
 
-    .card {
-      padding: 16px;
+    .pad { padding: 16px; }
+
+    /* ── App shell ── */
+    .app {
+      display: flex;
+      flex-direction: column;
+      min-height: 560px;
+    }
+    .app-content {
+      flex: 1;
+      overflow-y: auto;
+    }
+
+    /* Material Symbols icon class */
+    .mso {
+      font-family: 'Material Symbols Outlined', sans-serif;
+      font-weight: normal;
+      font-style: normal;
+      font-size: 1.25rem;
+      line-height: 1;
+      display: inline-block;
+      vertical-align: middle;
+      font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+    }
+
+    /* ── Dashboard ── */
+    .dashboard {
+      padding: 20px 20px 8px;
       display: grid;
-      gap: 12px;
+      gap: 16px;
     }
 
-    .header {
+    .dash-header {
       display: flex;
       justify-content: space-between;
       align-items: flex-start;
-      gap: 10px;
+      gap: 12px;
     }
 
-    .title {
-      font-size: 1.05rem;
+    .app-label {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 0.65rem;
       font-weight: 700;
-      line-height: 1.2;
+      letter-spacing: 0.25em;
+      color: var(--kin-primary);
+      text-transform: uppercase;
+      margin-bottom: 2px;
     }
 
-    .subtitle {
-      margin-top: 2px;
-      color: var(--ev-text-muted);
-      font-size: 0.78rem;
-      letter-spacing: 0.01em;
+    .dash-title {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 1.3rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      text-transform: uppercase;
     }
 
     .chips {
       display: flex;
       flex-wrap: wrap;
-      gap: 6px;
+      gap: 5px;
       justify-content: flex-end;
     }
 
     .chip {
       border-radius: 999px;
-      padding: 3px 9px;
-      font-size: 0.72rem;
-      border: 1px solid var(--ev-border);
-      background: rgba(120, 135, 150, 0.08);
+      padding: 3px 10px;
+      font-size: 0.68rem;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .chip-ok {
+      background: rgba(142, 255, 113, 0.12);
+      color: var(--kin-primary);
+      border: 1px solid rgba(142, 255, 113, 0.3);
+    }
+    .chip-off {
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--kin-on-variant);
+      border: 1px solid rgba(255, 255, 255, 0.08);
     }
 
-    .chip.ok {
-      border-color: rgba(45, 106, 79, 0.35);
-      background: rgba(45, 106, 79, 0.12);
-      color: var(--ev-accent);
+    /* ── Gauge ── */
+    .gauge-section {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
     }
 
-    .chip.off {
-      color: var(--ev-text-muted);
+    .gauge-wrap {
+      position: relative;
+      width: 220px;
+      height: 220px;
     }
 
-    .metrics {
+    .gauge-svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    .gauge-arc--glow {
+      filter: drop-shadow(0 0 10px rgba(142, 255, 113, 0.55));
+    }
+
+    .gauge-center {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .gauge-sublabel {
+      font-size: 0.6rem;
+      font-weight: 700;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--kin-on-variant);
+      margin-bottom: 4px;
+    }
+
+    .gauge-value {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 2.8rem;
+      font-weight: 700;
+      line-height: 1;
+      color: var(--kin-primary);
+      letter-spacing: -0.03em;
+    }
+
+    .gauge-unit {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 1.2rem;
+      font-weight: 500;
+      color: var(--kin-primary);
+      margin-top: 2px;
+    }
+
+    /* ── Status bar ── */
+    .status-bar {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--kin-surface-low);
+      padding: 8px 20px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .status-bar--active {
+      border-color: rgba(142, 255, 113, 0.2);
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--kin-on-variant);
+      flex-shrink: 0;
+    }
+    .status-dot--pulse {
+      background: var(--kin-primary);
+      animation: pulse-ring 1.5s ease-out infinite;
+    }
+
+    @keyframes pulse-ring {
+      0%   { box-shadow: 0 0 0 0 rgba(142, 255, 113, 0.5); }
+      70%  { box-shadow: 0 0 0 7px rgba(142, 255, 113, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(142, 255, 113, 0); }
+    }
+
+    .status-label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .status-divider {
+      width: 1px;
+      height: 14px;
+      background: rgba(255,255,255,0.15);
+    }
+    .status-icon {
+      font-size: 1rem;
+      color: var(--kin-secondary);
+    }
+    .status-sub {
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--kin-on-variant);
+    }
+
+    /* ── Telemetry ── */
+    .tele-grid {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+
+    .tele-tile {
+      background: var(--kin-surface-low);
+      border-radius: 14px;
+      padding: 14px 10px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.04);
+    }
+
+    .tele-icon { font-size: 1.3rem; }
+    .tele-icon--tertiary { color: var(--kin-tertiary); }
+    .tele-icon--secondary { color: var(--kin-secondary); }
+    .tele-icon--error { color: var(--kin-error); }
+
+    .tele-label {
+      font-size: 0.6rem;
+      font-weight: 700;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--kin-on-variant);
+    }
+
+    .tele-value {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 1.2rem;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .tele-unit {
+      font-size: 0.65rem;
+      font-weight: 400;
+      color: var(--kin-on-variant);
+      margin-left: 1px;
+    }
+
+    /* ── Action buttons ── */
+    .action-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .btn-action {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 14px 10px;
+      border-radius: 14px;
+      border: none;
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    .btn-action:active { transform: scale(0.96); }
+    .btn-action:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .btn-pause {
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--kin-on-surface);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .btn-pause:not(:disabled):hover { background: rgba(255,255,255,0.1); }
+
+    .btn-emergency {
+      background: #b92902;
+      color: #ffd2c8;
+      box-shadow: 0 6px 24px rgba(185, 41, 2, 0.3);
+    }
+    .btn-emergency:not(:disabled):hover { opacity: 0.9; }
+
+    /* ── Charge current control ── */
+    .current-box {
+      background: var(--kin-surface-low);
+      border-radius: 14px;
+      padding: 14px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border: 1px solid rgba(255, 255, 255, 0.04);
+    }
+
+    .current-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--kin-on-variant);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .current-ctrl {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .btn-step {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: var(--kin-surface-highest);
+      color: var(--kin-on-surface);
+      font-size: 1.1rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.12s;
+    }
+    .btn-step:not(:disabled):hover { background: rgba(142, 255, 113, 0.12); }
+    .btn-step:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .current-val {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 1.1rem;
+      font-weight: 700;
+      min-width: 52px;
+      text-align: center;
+      color: var(--kin-primary);
+    }
+
+    /* ── Strategy ── */
+    .strategy {
+      padding: 20px 20px 8px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .page-header { display: grid; gap: 4px; }
+
+    .page-sup {
+      font-size: 0.65rem;
+      font-weight: 700;
+      letter-spacing: 0.25em;
+      text-transform: uppercase;
+      color: var(--kin-primary);
+    }
+
+    .page-title {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 1.6rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .strat-section {
+      background: var(--kin-surface-container);
+      border-radius: 16px;
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .strat-section-label {
+      font-size: 0.62rem;
+      font-weight: 700;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--kin-on-variant);
+    }
+
+    .strat-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .strat-row-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .strat-icon {
+      font-size: 1.4rem;
+      color: var(--kin-primary);
+    }
+
+    .strat-row-title {
+      font-size: 0.88rem;
+      font-weight: 600;
+    }
+
+    .strat-row-sub {
+      font-size: 0.72rem;
+      color: var(--kin-on-variant);
+    }
+
+    /* Toggle switch */
+    .toggle {
+      width: 52px;
+      height: 30px;
+      border-radius: 999px;
+      background: var(--kin-surface-highest);
+      border: none;
+      position: relative;
+      cursor: pointer;
+      transition: background 0.2s;
+      flex-shrink: 0;
+    }
+    .toggle--on { background: var(--kin-primary); }
+    .toggle:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .toggle-thumb {
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: var(--kin-on-variant);
+      transition: transform 0.2s, background 0.2s;
+    }
+    .toggle--on .toggle-thumb {
+      transform: translateX(22px);
+      background: var(--kin-on-primary);
+    }
+
+    /* Profile grid */
+    .profile-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
       gap: 8px;
     }
 
-    .metric {
-      border: 1px solid var(--ev-border);
-      border-radius: 12px;
-      padding: 10px;
-      display: grid;
-      gap: 4px;
-      background: rgba(120, 135, 150, 0.06);
+    .profile-btn {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 5px;
+      padding: 14px 8px;
+      border-radius: 14px;
+      border: 2px solid rgba(255,255,255,0.06);
+      background: var(--kin-surface-highest);
+      color: var(--kin-on-variant);
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .profile-btn--active {
+      border-color: rgba(142, 255, 113, 0.5);
+      background: rgba(142, 255, 113, 0.08);
+      color: var(--kin-on-surface);
+    }
+    .profile-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .profile-icon {
+      font-size: 1.2rem;
+      color: inherit;
+    }
+    .profile-btn--active .profile-icon { color: var(--kin-primary); }
+
+    .profile-name {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
     }
 
-    .metric span {
-      color: var(--ev-text-muted);
-      font-size: 0.73rem;
+    .profile-thresholds {
+      font-size: 0.58rem;
+      color: var(--kin-on-variant);
     }
 
-    .metric strong {
+    /* Threshold sliders */
+    .threshold-block { display: grid; gap: 10px; }
+
+    .threshold-header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+    }
+
+    .threshold-label {
+      font-size: 0.62rem;
+      font-weight: 700;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--kin-on-variant);
+      margin-bottom: 4px;
+    }
+
+    .threshold-value {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 2rem;
+      font-weight: 700;
+      line-height: 1;
+      color: var(--kin-on-surface);
+    }
+    .threshold-value--stop { color: var(--kin-error); }
+
+    .threshold-unit {
+      font-family: 'Space Grotesk', sans-serif;
       font-size: 1rem;
-      line-height: 1.1;
+      font-weight: 500;
+      color: var(--kin-primary);
+      margin-left: 3px;
+    }
+    .threshold-value--stop .threshold-unit { color: var(--kin-error); }
+
+    .threshold-right-label {
+      font-size: 0.6rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--kin-on-variant);
+      padding-bottom: 2px;
     }
 
-    .graph-wrap {
-      border: 1px solid var(--ev-border);
+    /* Range inputs */
+    .slider {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 5px;
+      border-radius: 999px;
+      outline: none;
+      cursor: pointer;
+      border: none;
+      padding: 0;
+    }
+    .slider:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .slider--primary {
+      background: linear-gradient(
+        to right,
+        var(--kin-primary) var(--pct, 0%),
+        var(--kin-surface-highest) var(--pct, 0%)
+      );
+    }
+    .slider--error {
+      background: linear-gradient(
+        to right,
+        var(--kin-error) var(--pct, 0%),
+        var(--kin-surface-highest) var(--pct, 0%)
+      );
+    }
+
+    .slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: var(--kin-on-surface);
+      cursor: pointer;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.4);
+      transition: transform 0.1s;
+    }
+    .slider:not(:disabled)::-webkit-slider-thumb:active { transform: scale(1.15); }
+
+    .slider::-moz-range-thumb {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: var(--kin-on-surface);
+      cursor: pointer;
+      border: none;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.4);
+    }
+
+    /* Live status */
+    .live-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .live-item {
+      background: var(--kin-surface-high);
       border-radius: 12px;
-      padding: 8px 8px 6px;
-      background: rgba(120, 135, 150, 0.05);
+      padding: 12px;
     }
 
-    .graph {
+    .live-item-label {
+      font-size: 0.62rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--kin-on-variant);
+      margin-bottom: 5px;
+    }
+
+    .live-item-value {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: var(--kin-primary);
+    }
+
+    .live-item-value--decision {
+      font-family: 'Inter', sans-serif;
+      font-size: 0.72rem;
+      font-weight: 500;
+      color: var(--kin-on-surface);
+      word-break: break-word;
+    }
+
+    /* ── Logs ── */
+    .logs {
+      padding: 20px 20px 8px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .logs-section { display: grid; gap: 10px; }
+
+    .logs-section-label {
+      font-size: 0.62rem;
+      font-weight: 700;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--kin-on-variant);
+    }
+
+    /* Graph */
+    .graph-wrap {
+      background: var(--kin-surface-low);
+      border-radius: 14px;
+      padding: 10px 10px 8px;
+    }
+
+    .graph-svg {
       width: 100%;
       height: 90px;
       display: block;
     }
 
     .graph-empty {
-      border: 1px dashed var(--ev-border);
-      border-radius: 12px;
-      color: var(--ev-text-muted);
-      font-size: 0.8rem;
-      padding: 12px;
+      background: var(--kin-surface-low);
+      border-radius: 14px;
+      color: var(--kin-on-variant);
+      font-size: 0.78rem;
+      padding: 20px;
       text-align: center;
     }
 
-    .axis {
-      stroke: rgba(120, 135, 150, 0.35);
-      stroke-width: 1;
-    }
+    .graph-axis { stroke: rgba(255,255,255,0.1); stroke-width: 1; }
 
-    .line {
+    .graph-line {
       fill: none;
       stroke-width: 2;
       stroke-linecap: round;
       stroke-linejoin: round;
     }
+    .graph-line--power   { stroke: #69daff; }
+    .graph-line--surplus { stroke: var(--kin-primary); }
 
-    .line.power {
-      stroke: #2f4858;
-    }
-
-    .line.surplus {
-      stroke: #2d6a4f;
-    }
-
-    .legend {
-      margin-top: 6px;
+    .graph-legend {
       display: flex;
-      gap: 10px;
+      gap: 14px;
+      margin-top: 8px;
       flex-wrap: wrap;
     }
-
-    .leg {
+    .legend-item {
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      font-size: 0.72rem;
-      color: var(--ev-text-muted);
+      font-size: 0.68rem;
+      color: var(--kin-on-variant);
     }
-
-    .dot {
+    .legend-dot {
       width: 8px;
       height: 8px;
       border-radius: 50%;
       display: inline-block;
     }
+    .legend-dot--power   { background: #69daff; }
+    .legend-dot--surplus { background: var(--kin-primary); }
 
-    .dot.power {
-      background: #2f4858;
-    }
-
-    .dot.surplus {
-      background: #2d6a4f;
-    }
-
-    .controls {
+    /* Diagnostics */
+    .diag-row {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 8px;
+      gap: 10px;
     }
 
-    .btn {
-      height: 36px;
-      border-radius: 10px;
-      border: 1px solid var(--ev-border);
-      background: rgba(120, 135, 150, 0.08);
-      font-size: 0.83rem;
-      font-weight: 600;
-      color: var(--primary-text-color);
-      cursor: pointer;
+    .diag-card {
+      background: var(--kin-surface-container);
+      border-radius: 14px;
+      padding: 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
     }
 
-    .btn.primary {
-      border-color: rgba(45, 106, 79, 0.45);
-      background: rgba(45, 106, 79, 0.16);
-      color: #204738;
-    }
-
-    .btn.tiny {
+    .diag-icon-wrap {
       width: 38px;
-      height: 32px;
-    }
-
-    .btn:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    .current-box {
+      height: 38px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.05);
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 10px;
+      color: var(--kin-on-variant);
+      flex-shrink: 0;
     }
+    .diag-icon-wrap--ok   { background: rgba(142, 255, 113, 0.1); color: var(--kin-primary); }
+    .diag-icon-wrap--warn { background: rgba(255, 115, 81, 0.12); color: var(--kin-error); }
 
-    .current-value {
-      min-width: 70px;
-      text-align: center;
-      font-size: 0.95rem;
+    .diag-label {
+      font-size: 0.6rem;
       font-weight: 700;
-    }
-
-    .profiles {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 8px;
-    }
-
-    .profile {
-      height: 34px;
-      border-radius: 999px;
-      border: 1px solid var(--ev-border);
-      background: transparent;
-      font-size: 0.78rem;
+      letter-spacing: 0.15em;
       text-transform: uppercase;
-      letter-spacing: 0.04em;
-      cursor: pointer;
+      color: var(--kin-on-variant);
+      margin-bottom: 3px;
     }
 
-    .profile.active {
-      border-color: rgba(45, 106, 79, 0.45);
-      background: rgba(45, 106, 79, 0.18);
-      color: #204738;
+    .diag-value {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 0.78rem;
       font-weight: 700;
     }
 
-    .details-toggle,
-    .debug-toggle {
-      background: transparent;
-      border: 0;
-      color: var(--ev-text-muted);
-      font-size: 0.78rem;
-      cursor: pointer;
-      justify-self: start;
-      padding: 0;
-    }
-
-    .details {
-      border-top: 1px dashed var(--ev-border);
-      padding-top: 10px;
-      display: grid;
-      gap: 8px;
-    }
-
-    .detail-row {
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
-      font-size: 0.82rem;
-    }
-
+    /* Debug grid */
     .debug-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 8px;
+      gap: 10px;
     }
 
     .debug-item {
-      border: 1px solid var(--ev-border);
-      border-radius: 10px;
-      padding: 8px;
+      background: var(--kin-surface-container);
+      border-radius: 12px;
+      padding: 12px;
+    }
+
+    .debug-item-label {
+      font-size: 0.6rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--kin-on-variant);
+      margin-bottom: 5px;
+    }
+
+    .debug-item-value {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 0.88rem;
+      font-weight: 700;
+      color: var(--kin-primary);
+    }
+
+    /* Terminal log */
+    .terminal {
+      background: #000;
+      border-radius: 14px;
+      padding: 16px;
+      font-family: 'Courier New', monospace;
+      font-size: 0.75rem;
+      border: 1px solid rgba(255,255,255,0.06);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .terminal-icon-bg {
+      position: absolute;
+      top: 8px;
+      right: 10px;
+      opacity: 0.08;
+      pointer-events: none;
+      font-size: 2.5rem;
+      color: var(--kin-on-surface);
+    }
+
+    .terminal-line {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      flex-wrap: wrap;
+    }
+
+    .terminal-ts { color: var(--kin-on-variant); flex-shrink: 0; }
+
+    .terminal-tag {
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      padding: 1px 6px;
+      border-radius: 4px;
+      flex-shrink: 0;
+    }
+    .terminal-tag--active {
+      background: rgba(142, 255, 113, 0.15);
+      color: var(--kin-primary);
+    }
+
+    .terminal-msg { color: var(--kin-on-surface); flex: 1; word-break: break-word; }
+
+    .terminal-footer {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .terminal-live {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.6rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--kin-on-variant);
+    }
+
+    .terminal-live-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--kin-primary);
+      animation: pulse-ring 1.5s ease-out infinite;
+    }
+
+    /* ── Bottom nav ── */
+    .bottom-nav {
       display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      background: rgba(19, 19, 19, 0.85);
+      backdrop-filter: blur(16px);
+      border-top: 1px solid rgba(255,255,255,0.06);
+      padding: 10px 8px 14px;
       gap: 4px;
-      background: rgba(120, 135, 150, 0.05);
-      font-size: 0.78rem;
     }
 
-    .debug-item span {
-      color: var(--ev-text-muted);
+    .nav-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      padding: 8px 4px;
+      border-radius: 14px;
+      border: none;
+      background: transparent;
+      color: var(--kin-on-variant);
+      cursor: pointer;
+      transition: color 0.15s, background 0.15s;
+    }
+    .nav-item:hover { color: var(--kin-on-surface); }
+    .nav-item--active {
+      background: var(--kin-surface-highest);
+      color: var(--kin-primary);
     }
 
-    @media (max-width: 460px) {
-      .metrics {
-        grid-template-columns: 1fr;
-      }
-      .controls {
-        grid-template-columns: 1fr;
-      }
-      .debug-grid {
-        grid-template-columns: 1fr;
-      }
+    .nav-icon {
+      font-size: 1.3rem;
+      transition: color 0.15s;
+    }
+
+    .nav-label {
+      font-size: 0.58rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 380px) {
+      .tele-grid, .action-grid { grid-template-columns: 1fr; }
+      .profile-grid { grid-template-columns: repeat(3, 1fr); }
+      .diag-row, .debug-grid, .live-grid { grid-template-columns: 1fr; }
     }
   `;
 customElements.define("tuya-ev-charger-card", TuyaEvChargerCard);
 var ENTITY_FIELD_SPECS = [
-  {
-    key: "charge_session",
-    label: "Charge session switch",
-    domain: "switch",
-    suffixes: ["charge_session"]
-  },
-  {
-    key: "surplus_mode",
-    label: "Surplus mode switch",
-    domain: "switch",
-    suffixes: ["surplus_mode"]
-  },
-  {
-    key: "surplus_profile",
-    label: "Surplus profile select",
-    domain: "select",
-    suffixes: ["surplus_profile"]
-  },
-  {
-    key: "charge_current",
-    label: "Charge current number",
-    domain: "number",
-    suffixes: ["charge_current"]
-  },
-  {
-    key: "power",
-    label: "Power sensor",
-    domain: "sensor",
-    suffixes: ["power_l1"]
-  },
-  {
-    key: "current",
-    label: "Current sensor",
-    domain: "sensor",
-    suffixes: ["current_l1"]
-  },
-  {
-    key: "last_decision",
-    label: "Last decision sensor",
-    domain: "sensor",
-    suffixes: ["surplus_last_decision_reason"]
-  },
-  {
-    key: "surplus_effective",
-    label: "Effective surplus sensor",
-    domain: "sensor",
-    suffixes: ["surplus_effective_w"]
-  },
-  {
-    key: "surplus_raw",
-    label: "Raw surplus sensor",
-    domain: "sensor",
-    suffixes: ["surplus_raw_w"]
-  },
-  {
-    key: "surplus_discharge_over_limit",
-    label: "Battery over-limit sensor",
-    domain: "sensor",
-    suffixes: ["surplus_battery_discharge_over_limit_w"]
-  },
-  {
-    key: "surplus_target_current",
-    label: "Target current sensor",
-    domain: "sensor",
-    suffixes: ["surplus_target_current_a"]
-  },
-  {
-    key: "regulation_active",
-    label: "Regulation active binary sensor",
-    domain: "binary_sensor",
-    suffixes: ["surplus_regulation_active"]
-  }
+  { key: "charge_session", label: "Charge session switch", domain: "switch", suffixes: ["charge_session"] },
+  { key: "surplus_mode", label: "Surplus mode switch", domain: "switch", suffixes: ["surplus_mode"] },
+  { key: "surplus_profile", label: "Surplus profile select", domain: "select", suffixes: ["surplus_profile"] },
+  { key: "charge_current", label: "Charge current number", domain: "number", suffixes: ["charge_current"] },
+  { key: "surplus_start_threshold", label: "Start threshold number", domain: "number", suffixes: ["surplus_start_threshold_w"] },
+  { key: "surplus_stop_threshold", label: "Stop threshold number", domain: "number", suffixes: ["surplus_stop_threshold_w"] },
+  { key: "power", label: "Power sensor", domain: "sensor", suffixes: ["power_l1"] },
+  { key: "current", label: "Current sensor", domain: "sensor", suffixes: ["current_l1"] },
+  { key: "voltage", label: "Voltage sensor", domain: "sensor", suffixes: ["voltage_l1"] },
+  { key: "temperature", label: "Temperature sensor", domain: "sensor", suffixes: ["temperature"] },
+  { key: "work_state", label: "Work state sensor", domain: "sensor", suffixes: ["work_state"] },
+  { key: "selftest", label: "Self-test sensor", domain: "sensor", suffixes: ["selftest"] },
+  { key: "alarm", label: "Alarm sensor", domain: "sensor", suffixes: ["alarm"] },
+  { key: "last_decision", label: "Last decision sensor", domain: "sensor", suffixes: ["surplus_last_decision_reason"] },
+  { key: "surplus_effective", label: "Effective surplus sensor", domain: "sensor", suffixes: ["surplus_effective_w"] },
+  { key: "surplus_raw", label: "Raw surplus sensor", domain: "sensor", suffixes: ["surplus_raw_w"] },
+  { key: "surplus_discharge_over_limit", label: "Battery over-limit sensor", domain: "sensor", suffixes: ["surplus_battery_discharge_over_limit_w"] },
+  { key: "surplus_target_current", label: "Target current sensor", domain: "sensor", suffixes: ["surplus_target_current_a"] },
+  { key: "regulation_active", label: "Regulation active binary sensor", domain: "binary_sensor", suffixes: ["surplus_regulation_active"] },
+  { key: "reboot", label: "Reboot button", domain: "button", suffixes: ["reboot_charger"] }
 ];
 var normalizeToken = (input) => String(input ?? "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "_");
-var ENTITY_FIELD_KEY_SET = new Set(ENTITY_FIELD_SPECS.map((field) => field.key));
+var ENTITY_FIELD_KEY_SET = new Set(ENTITY_FIELD_SPECS.map((f3) => f3.key));
 var TuyaEvChargerCardEditor = class extends i4 {
   constructor() {
     super(...arguments);
@@ -1765,7 +2536,7 @@ var TuyaEvChargerCardEditor = class extends i4 {
           <input
             type="text"
             .value=${cfg.title ?? ""}
-            @input=${(event) => this._updateRootText("title", event.target.value)}
+            @input=${(e4) => this._updateRootText("title", e4.target.value)}
           />
         </label>
         <label>
@@ -1773,364 +2544,120 @@ var TuyaEvChargerCardEditor = class extends i4 {
           <div class="inline">
             <select
               .value=${selectedToken}
-              @change=${(event) => this._autoFillFromToken(event.target.value)}
+              @change=${(e4) => this._autoFillFromToken(e4.target.value)}
             >
-              <option value="">Select...</option>
+              <option value="">Select…</option>
               ${detectedTokens.map(
-      (token) => b2`<option value=${token}>${token}</option>`
+      (t3) => b2`<option value=${t3}>${t3}</option>`
     )}
             </select>
-            <button
-              type="button"
-              class="action"
-              @click=${() => this._autoFillFromToken(cfg.charger_name ?? "")}
-              ?disabled=${!selectedToken}
-            >
-              Auto-fill
-            </button>
+            ${selectedToken ? b2`<button @click=${this._clearAutoFill}>Clear</button>` : A}
           </div>
         </label>
-        <label>
-          <span>Charger token (advanced)</span>
-          <input
-            type="text"
-            .value=${cfg.charger_name ?? ""}
-            @input=${(event) => this._updateRootText(
-      "charger_name",
-      event.target.value
-    )}
-          />
-        </label>
-        <h3>Entity overrides</h3>
-        <p class="hint">
-          Optional. Keep "Auto-detected" when possible.
-        </p>
-        <div class="grid">
-          ${ENTITY_FIELD_SPECS.map(
-      (field) => b2`
-              <label>
-                <span>${field.label}</span>
-                <select
-                  .value=${entities[field.key] ?? ""}
-                  @change=${(event) => this._updateEntity(
-        field.key,
-        event.target.value
-      )}
-                >
-                  <option value="">Auto-detected</option>
-                  ${this._entityOptions(field).map(
-        (entityId) => b2`<option value=${entityId}>${entityId}</option>`
-      )}
-                </select>
-              </label>
-            `
-    )}
-        </div>
+
+        <h3>Entities</h3>
+        ${ENTITY_FIELD_SPECS.map((spec) => {
+      const value = entities[spec.key] ?? "";
+      const suggestions = this._suggestionsForField(spec, selectedToken);
+      return b2`
+            <label>
+              <span>${spec.label}</span>
+              <input
+                type="text"
+                .value=${value}
+                list="suggestions-${spec.key}"
+                @input=${(e4) => this._updateEntityField(spec.key, e4.target.value)}
+                placeholder=${suggestions[0] ?? `${spec.domain}.*`}
+              />
+              <datalist id="suggestions-${spec.key}">
+                ${suggestions.map((s4) => b2`<option value=${s4}></option>`)}
+              </datalist>
+            </label>
+          `;
+    })}
       </div>
     `;
   }
+  _detectedChargerTokens() {
+    if (!this.hass) return [];
+    const idx = this._stateIndex();
+    return [...idx.rolesByToken.keys()].sort();
+  }
   _stateIndex() {
     if (!this.hass) {
-      return {
-        all: [],
-        byDomain: /* @__PURE__ */ new Map(),
-        byRole: /* @__PURE__ */ new Map(),
-        rolesByToken: /* @__PURE__ */ new Map()
-      };
+      return { all: [], byDomain: /* @__PURE__ */ new Map(), byRole: /* @__PURE__ */ new Map(), rolesByToken: /* @__PURE__ */ new Map() };
     }
     const states = this.hass.states;
-    const cached = this._stateIndexCache.get(states);
-    if (cached) {
-      return cached;
+    if (this._stateIndexCache.has(states)) {
+      return this._stateIndexCache.get(states);
     }
+    const all = Object.keys(states);
     const byDomain = /* @__PURE__ */ new Map();
     const byRole = /* @__PURE__ */ new Map();
     const rolesByToken = /* @__PURE__ */ new Map();
-    const all = Object.keys(states).sort();
-    for (const entityId of all) {
-      const [domain] = entityId.split(".");
-      if (domain) {
-        const list = byDomain.get(domain) ?? [];
-        list.push(entityId);
-        byDomain.set(domain, list);
-      }
-      const rawRole = String(states[entityId]?.attributes[ATTR_CARD_ROLE] ?? "").trim();
-      if (!ENTITY_FIELD_KEY_SET.has(rawRole)) {
-        continue;
-      }
-      const role = rawRole;
-      const roleList = byRole.get(role) ?? [];
-      roleList.push(entityId);
-      byRole.set(role, roleList);
-      const token = normalizeToken(
-        String(states[entityId]?.attributes[ATTR_CHARGER_TOKEN] ?? "")
-      );
-      if (!token) {
-        continue;
-      }
-      const tokenRoles = rolesByToken.get(token) ?? /* @__PURE__ */ new Set();
-      tokenRoles.add(role);
-      rolesByToken.set(token, tokenRoles);
-    }
-    const index = { all, byDomain, byRole, rolesByToken };
-    this._stateIndexCache.set(states, index);
-    return index;
-  }
-  _detectedChargerTokens() {
-    if (!this.hass) {
-      return [];
-    }
-    const stateIndex = this._stateIndex();
-    const technicalRanked = [...stateIndex.rolesByToken.entries()].filter(([, roles]) => roles.size >= 2).sort((a3, b3) => b3[1].size - a3[1].size || a3[0].localeCompare(b3[0])).map(([token]) => token);
-    if (technicalRanked.length) {
-      const selected2 = normalizeToken(this._config.charger_name);
-      if (selected2 && !technicalRanked.includes(selected2)) {
-        technicalRanked.unshift(selected2);
-      }
-      return technicalRanked.slice(0, 20);
-    }
-    const weighted = /* @__PURE__ */ new Map();
-    const all = stateIndex.all;
-    for (const field of ENTITY_FIELD_SPECS) {
-      const domainEntities = stateIndex.byDomain.get(field.domain) ?? [];
-      domainEntities.forEach((entityId) => {
-        const token = this._extractToken(entityId, field.suffixes);
-        if (!token) {
-          return;
+    for (const id of all) {
+      const domain = id.split(".")[0];
+      const existing = byDomain.get(domain) ?? [];
+      existing.push(id);
+      byDomain.set(domain, existing);
+      const attrs = states[id].attributes;
+      const role = attrs[ATTR_CARD_ROLE];
+      const token = attrs[ATTR_CHARGER_TOKEN];
+      if (role && ENTITY_FIELD_KEY_SET.has(role)) {
+        const rKey = role;
+        const rList = byRole.get(rKey) ?? [];
+        rList.push(id);
+        byRole.set(rKey, rList);
+        if (token) {
+          const tokenSet = rolesByToken.get(token) ?? /* @__PURE__ */ new Set();
+          tokenSet.add(rKey);
+          rolesByToken.set(token, tokenSet);
         }
-        const bucket = weighted.get(token) ?? { count: 0, domains: /* @__PURE__ */ new Set() };
-        bucket.count += 4;
-        bucket.domains.add(field.domain);
-        weighted.set(token, bucket);
-      });
+      }
     }
-    const eligibleDomains = new Set(ENTITY_FIELD_SPECS.map((field) => field.domain));
-    all.forEach((entityId) => {
-      const [domain, objectIdRaw] = entityId.split(".");
-      const objectId = normalizeToken(objectIdRaw);
-      if (!domain || !objectId || !eligibleDomains.has(domain)) {
-        return;
-      }
-      for (const token of this._candidatePrefixTokens(objectId)) {
-        const bucket = weighted.get(token) ?? { count: 0, domains: /* @__PURE__ */ new Set() };
-        bucket.count += 1;
-        bucket.domains.add(domain);
-        weighted.set(token, bucket);
-      }
-    });
-    const ranked = [...weighted.entries()].filter(([, value]) => value.count >= 3 && value.domains.size >= 2).sort((a3, b3) => {
-      const scoreDiff = b3[1].count - a3[1].count;
-      if (scoreDiff !== 0) {
-        return scoreDiff;
-      }
-      return b3[0].length - a3[0].length;
-    }).map(([token]) => token);
-    const selected = normalizeToken(this._config.charger_name);
-    if (selected && !ranked.includes(selected)) {
-      ranked.unshift(selected);
-    }
-    return ranked.slice(0, 20);
+    const idx = { all, byDomain, byRole, rolesByToken };
+    this._stateIndexCache.set(states, idx);
+    return idx;
   }
-  _entityOptions(field) {
-    if (!this.hass) {
-      return [];
-    }
-    const stateIndex = this._stateIndex();
-    const token = normalizeToken(this._config.charger_name);
-    const all = (stateIndex.byDomain.get(field.domain) ?? []).slice();
-    const roleMatches = (stateIndex.byRole.get(field.key) ?? []).filter(
-      (entityId) => entityId.startsWith(`${field.domain}.`)
-    );
-    const matchingSuffix = all.filter(
-      (entityId) => this._matchesSuffix(entityId, field.suffixes)
-    );
-    const source = (roleMatches.length ? roleMatches : matchingSuffix.length ? matchingSuffix : all).slice();
-    source.sort((a3, b3) => {
-      const aScore = this._tokenScore(a3, token);
-      const bScore = this._tokenScore(b3, token);
-      if (aScore !== bScore) {
-        return aScore - bScore;
-      }
-      const indexDiff = this._entityIndex(a3) - this._entityIndex(b3);
-      if (indexDiff !== 0) {
-        return indexDiff;
-      }
-      return a3.localeCompare(b3);
-    });
-    return source;
+  _suggestionsForField(spec, token) {
+    if (!this.hass) return [];
+    const idx = this._stateIndex();
+    const fromRole = idx.byRole.get(spec.key) ?? [];
+    const fromDomain = idx.byDomain.get(spec.domain) ?? [];
+    const fromSuffix = token ? spec.suffixes.map((s4) => `${spec.domain}.${token}_${s4}`).filter((id) => this.hass.states[id]) : [];
+    return [.../* @__PURE__ */ new Set([...fromSuffix, ...fromRole, ...fromDomain])].slice(0, 8);
   }
-  _autoFillFromToken(rawToken) {
-    const token = normalizeToken(rawToken);
-    const next = { ...this._config };
-    if (token) {
-      next.charger_name = token;
-    } else {
-      delete next.charger_name;
+  _autoFillFromToken(token) {
+    if (!token || !this.hass) {
+      this._updateRootText("charger_name", "");
+      return;
     }
-    const entities = {};
-    for (const field of ENTITY_FIELD_SPECS) {
-      const guessed = this._guessEntity(field, token);
-      if (guessed) {
-        entities[field.key] = guessed;
+    this._updateRootText("charger_name", token);
+    const newEntities = { ...this._config.entities ?? {} };
+    for (const spec of ENTITY_FIELD_SPECS) {
+      for (const suffix of spec.suffixes) {
+        const candidate = `${spec.domain}.${token}_${suffix}`;
+        if (this.hass.states[candidate]) {
+          newEntities[spec.key] = candidate;
+          break;
+        }
       }
     }
-    if (Object.keys(entities).length) {
-      next.entities = entities;
-    } else {
-      delete next.entities;
-    }
-    this._emit(next);
+    this._fireConfigChanged({ ...this._config, charger_name: token, entities: newEntities });
   }
-  _guessEntity(field, token) {
-    if (!this.hass) {
-      return void 0;
-    }
-    const stateIndex = this._stateIndex();
-    const all = (stateIndex.byDomain.get(field.domain) ?? []).slice();
-    const roleMatches = (stateIndex.byRole.get(field.key) ?? []).filter(
-      (entityId) => entityId.startsWith(`${field.domain}.`)
-    );
-    const rankedByRole = roleMatches.sort((a3, b3) => {
-      const scoreDiff = this._tokenScore(a3, token) - this._tokenScore(b3, token);
-      if (scoreDiff !== 0) {
-        return scoreDiff;
-      }
-      return this._entityIndex(a3) - this._entityIndex(b3);
-    });
-    if (rankedByRole.length) {
-      return rankedByRole[0];
-    }
-    const matches = all.filter(
-      (entityId) => this._matchesSuffix(entityId, field.suffixes)
-    );
-    const tokenMatches = token ? all.filter((entityId) => this._tokenScore(entityId, token) <= 1) : [];
-    const source = matches.length ? matches : tokenMatches;
-    if (!source.length) {
-      return void 0;
-    }
-    if (!token) {
-      return source[0];
-    }
-    return source.sort((a3, b3) => this._tokenScore(a3, token) - this._tokenScore(b3, token))[0];
-  }
-  _matchesSuffix(entityId, suffixes) {
-    return suffixes.some(
-      (suffix) => entityId.endsWith(`_${suffix}`) || entityId.endsWith(suffix)
-    );
-  }
-  _entityToken(entityId) {
-    if (!this.hass) {
-      return "";
-    }
-    const raw = this.hass.states[entityId]?.attributes[ATTR_CHARGER_TOKEN];
-    return normalizeToken(String(raw ?? ""));
-  }
-  _entityIndex(entityId) {
-    if (!this.hass) {
-      return 9999;
-    }
-    const raw = this.hass.states[entityId]?.attributes[ATTR_CARD_INDEX];
-    const parsed = Number(raw);
-    return Number.isFinite(parsed) ? parsed : 9999;
-  }
-  _candidatePrefixTokens(objectId) {
-    const normalized = normalizeToken(objectId);
-    const parts = normalized.split("_").filter(Boolean);
-    const tokens = [];
-    for (let index = 1; index < parts.length; index += 1) {
-      const token = parts.slice(0, index).join("_");
-      if (token.length >= 3) {
-        tokens.push(token);
-      }
-    }
-    return tokens;
-  }
-  _tokenScore(entityId, token) {
-    if (!token) {
-      return 1;
-    }
-    const technicalToken = this._entityToken(entityId);
-    if (technicalToken && technicalToken === token) {
-      return 0;
-    }
-    const objectId = normalizeToken(entityId.split(".")[1] ?? "");
-    if (!objectId) {
-      return 4;
-    }
-    if (objectId === token || objectId.startsWith(`${token}_`)) {
-      return 1;
-    }
-    if (objectId.includes(token)) {
-      return 2;
-    }
-    return 3;
-  }
-  _extractToken(entityId, suffixes) {
-    const objectId = entityId.split(".")[1] ?? "";
-    if (!objectId) {
-      return void 0;
-    }
-    for (const suffix of suffixes) {
-      if (objectId === suffix) {
-        continue;
-      }
-      const underscored = `_${suffix}`;
-      if (objectId.endsWith(underscored)) {
-        const token = normalizeToken(
-          objectId.slice(0, objectId.length - underscored.length)
-        );
-        return token || void 0;
-      }
-      if (objectId.endsWith(suffix)) {
-        const token = normalizeToken(
-          objectId.slice(0, objectId.length - suffix.length).replace(/_+$/, "")
-        );
-        return token || void 0;
-      }
-    }
-    return void 0;
+  _clearAutoFill() {
+    this._fireConfigChanged({ ...this._config, charger_name: void 0, entities: {} });
   }
   _updateRootText(key, value) {
-    const next = { ...this._config };
-    const trimmed = key === "charger_name" ? normalizeToken(value) : value.trim();
-    if (trimmed) {
-      next[key] = trimmed;
-    } else {
-      delete next[key];
-    }
-    this._emit(next);
+    this._fireConfigChanged({ ...this._config, [key]: value || void 0 });
   }
-  _updateEntity(key, value) {
-    const trimmed = value.trim();
-    const entities = {
-      ...this._config.entities ?? {}
-    };
-    if (trimmed) {
-      entities[key] = trimmed;
-    } else {
-      delete entities[key];
-    }
-    const next = { ...this._config };
-    if (Object.keys(entities).length) {
-      next.entities = entities;
-    } else {
-      delete next.entities;
-    }
-    this._emit(next);
+  _updateEntityField(key, value) {
+    const entities = { ...this._config.entities ?? {}, [key]: value || void 0 };
+    this._fireConfigChanged({ ...this._config, entities });
   }
-  _emit(next) {
-    const normalized = {
-      ...next,
-      type: "custom:tuya-ev-charger-card"
-    };
-    this._config = normalized;
-    this.dispatchEvent(
-      new CustomEvent("config-changed", {
-        detail: { config: normalized },
-        bubbles: true,
-        composed: true
-      })
-    );
+  _fireConfigChanged(config) {
+    this._config = config;
+    this.dispatchEvent(new CustomEvent("config-changed", { detail: { config }, bubbles: true, composed: true }));
   }
 };
 TuyaEvChargerCardEditor.properties = {
@@ -2138,83 +2665,34 @@ TuyaEvChargerCardEditor.properties = {
   _config: { attribute: false, state: true }
 };
 TuyaEvChargerCardEditor.styles = i`
-    .editor {
-      display: grid;
-      gap: 12px;
-      padding: 8px 0;
-    }
-
-    h3 {
-      margin: 0;
-      font-size: 0.9rem;
-      font-weight: 700;
-    }
-
-    .hint {
-      margin: -6px 0 0;
-      color: var(--secondary-text-color);
-      font-size: 0.78rem;
-    }
-
-    .grid {
-      display: grid;
-      gap: 8px;
-    }
-
-    .inline {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 8px;
-    }
-
-    label {
-      display: grid;
-      gap: 4px;
-    }
-
-    span {
-      font-size: 0.78rem;
-      color: var(--secondary-text-color);
-    }
-
-    input,
-    select {
-      height: 34px;
-      border: 1px solid rgba(120, 135, 150, 0.35);
-      border-radius: 9px;
-      padding: 0 10px;
-      font: inherit;
+    .editor { display: grid; gap: 10px; padding: 8px 0; }
+    h3 { margin: 8px 0 2px; font-size: 0.85rem; font-weight: 600; color: var(--secondary-text-color); }
+    label { display: grid; gap: 4px; font-size: 0.82rem; }
+    label span { color: var(--secondary-text-color); font-size: 0.78rem; }
+    input, select {
+      width: 100%;
+      padding: 6px 10px;
+      border: 1px solid var(--divider-color);
+      border-radius: 6px;
       background: var(--card-background-color);
       color: var(--primary-text-color);
+      font-size: 0.85rem;
+      box-sizing: border-box;
     }
-
-    .action {
-      height: 34px;
-      padding: 0 12px;
-      border: 1px solid rgba(45, 106, 79, 0.45);
-      border-radius: 9px;
-      font: inherit;
-      font-size: 0.78rem;
-      font-weight: 600;
-      color: #204738;
-      background: rgba(45, 106, 79, 0.14);
+    .inline { display: flex; gap: 6px; }
+    .inline select { flex: 1; }
+    .inline button {
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--divider-color);
+      background: transparent;
+      color: var(--primary-text-color);
       cursor: pointer;
-    }
-
-    .action:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
+      font-size: 0.8rem;
+      white-space: nowrap;
     }
   `;
 customElements.define("tuya-ev-charger-card-editor", TuyaEvChargerCardEditor);
-window.customCards = window.customCards || [];
-window.customCards.push({
-  type: "tuya-ev-charger-card",
-  name: "Tuya EV Charger Card",
-  description: "Modern and sober dashboard card for Tuya EV Charger Local",
-  preview: true,
-  configurable: true
-});
 /*! Bundled license information:
 
 @lit/reactive-element/css-tag.js:
