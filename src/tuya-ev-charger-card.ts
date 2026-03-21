@@ -501,7 +501,7 @@ class TuyaEvChargerCard extends LitElement {
               style="--pct: ${startPct}%"
               @input=${(ev: Event) => this._onThresholdInput(e.surplusStartThreshold, ev)}
               @change=${(ev: Event) => this._onThresholdChange(e.surplusStartThreshold, ev)}
-              ?disabled=${!e.surplusStartThreshold}
+              ?disabled=${!this._entityExists(e.surplusStartThreshold)}
               class="slider slider--primary"
             />
           </div>
@@ -526,7 +526,7 @@ class TuyaEvChargerCard extends LitElement {
               style="--pct: ${stopPct}%"
               @input=${(ev: Event) => this._onThresholdInput(e.surplusStopThreshold, ev)}
               @change=${(ev: Event) => this._onThresholdChange(e.surplusStopThreshold, ev)}
-              ?disabled=${!e.surplusStopThreshold}
+              ?disabled=${!this._entityExists(e.surplusStopThreshold)}
               class="slider slider--error"
             />
           </div>
@@ -887,6 +887,11 @@ class TuyaEvChargerCard extends LitElement {
     return this.hass.states[id];
   }
 
+  /** True only if the entity ID is configured AND present in hass.states. */
+  private _entityExists(id?: string): boolean {
+    return Boolean(id && this.hass?.states[id]);
+  }
+
   private _state(id?: string): string | undefined {
     if (!id) return undefined;
     const opt = this._optimisticStates[id];
@@ -1148,7 +1153,7 @@ class TuyaEvChargerCard extends LitElement {
   }
 
   private async _onThresholdChange(entityId: string | undefined, ev: Event): Promise<void> {
-    if (!this.hass || !entityId) return;
+    if (!this.hass || !entityId || !this._entityExists(entityId)) return;
     const value = parseInt((ev.target as HTMLInputElement).value, 10);
     // Clear slider tracking and use optimistic state instead
     const next = { ...this._sliderValues };
@@ -1164,7 +1169,7 @@ class TuyaEvChargerCard extends LitElement {
     value: number, minimum: number, maximum: number, allowed: number[] = []
   ): Promise<void> {
     const id = this._resolvedEntities.chargeCurrent;
-    if (!this.hass || !id) return;
+    if (!this.hass || !this._entityExists(id)) return;
     const clamped = Math.max(minimum, Math.min(maximum, Math.round(value)));
     const target = allowed.length > 0
       ? allowed.filter((c) => c >= minimum && c <= maximum)

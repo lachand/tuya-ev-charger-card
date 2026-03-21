@@ -906,7 +906,7 @@ var TuyaEvChargerCard = class extends i4 {
               style="--pct: ${startPct}%"
               @input=${(ev) => this._onThresholdInput(e4.surplusStartThreshold, ev)}
               @change=${(ev) => this._onThresholdChange(e4.surplusStartThreshold, ev)}
-              ?disabled=${!e4.surplusStartThreshold}
+              ?disabled=${!this._entityExists(e4.surplusStartThreshold)}
               class="slider slider--primary"
             />
           </div>
@@ -931,7 +931,7 @@ var TuyaEvChargerCard = class extends i4 {
               style="--pct: ${stopPct}%"
               @input=${(ev) => this._onThresholdInput(e4.surplusStopThreshold, ev)}
               @change=${(ev) => this._onThresholdChange(e4.surplusStopThreshold, ev)}
-              ?disabled=${!e4.surplusStopThreshold}
+              ?disabled=${!this._entityExists(e4.surplusStopThreshold)}
               class="slider slider--error"
             />
           </div>
@@ -1247,6 +1247,10 @@ var TuyaEvChargerCard = class extends i4 {
     if (!id || !this.hass) return void 0;
     return this.hass.states[id];
   }
+  /** True only if the entity ID is configured AND present in hass.states. */
+  _entityExists(id) {
+    return Boolean(id && this.hass?.states[id]);
+  }
   _state(id) {
     if (!id) return void 0;
     const opt = this._optimisticStates[id];
@@ -1527,7 +1531,7 @@ var TuyaEvChargerCard = class extends i4 {
     this._sliderValues = { ...this._sliderValues, [entityId]: value };
   }
   async _onThresholdChange(entityId, ev) {
-    if (!this.hass || !entityId) return;
+    if (!this.hass || !entityId || !this._entityExists(entityId)) return;
     const value = parseInt(ev.target.value, 10);
     const next = { ...this._sliderValues };
     delete next[entityId];
@@ -1541,7 +1545,7 @@ var TuyaEvChargerCard = class extends i4 {
   }
   async _setChargeCurrent(value, minimum, maximum, allowed = []) {
     const id = this._resolvedEntities.chargeCurrent;
-    if (!this.hass || !id) return;
+    if (!this.hass || !this._entityExists(id)) return;
     const clamped = Math.max(minimum, Math.min(maximum, Math.round(value)));
     const target = allowed.length > 0 ? allowed.filter((c4) => c4 >= minimum && c4 <= maximum).reduce((best, c4) => Math.abs(c4 - clamped) < Math.abs(best - clamped) ? c4 : best, clamped) : clamped;
     this._setOptimisticState(id, String(target));
