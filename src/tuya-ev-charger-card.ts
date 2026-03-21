@@ -1056,6 +1056,14 @@ class TuyaEvChargerCard extends LitElement {
         case "surplus_effective": result.surplusEffective = entityId; break;
         case "surplus_discharge_over_limit": result.surplusDischargeOverLimit = entityId; break;
         case "surplus_target_current": result.surplusTargetCurrent = entityId; break;
+        case "voltage":                result.voltage = entityId; break;
+        case "temperature":            result.temperature = entityId; break;
+        case "work_state":             result.workState = entityId; break;
+        case "selftest":               result.selftest = entityId; break;
+        case "alarm":                  result.alarm = entityId; break;
+        case "reboot":                 result.reboot = entityId; break;
+        case "surplus_start_threshold": result.surplusStartThreshold = entityId; break;
+        case "surplus_stop_threshold":  result.surplusStopThreshold = entityId; break;
       }
     }
     return result;
