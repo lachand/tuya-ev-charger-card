@@ -937,6 +937,49 @@ var TuyaEvChargerCard = class extends i4 {
           </div>
         </section>
 
+        <!-- Scheduled charging -->
+        <section class="strat-section">
+          <div class="strat-row">
+            <div class="strat-row-left">
+              <span class="mso strat-icon">schedule</span>
+              <div>
+                <div class="strat-row-title">Scheduled Charging</div>
+                <div class="strat-row-sub">Charge within a time window</div>
+              </div>
+            </div>
+            <button
+              class="toggle ${this._isOn(e4.scheduleEnabled) ? "toggle--on" : ""}"
+              @click=${this._onScheduleToggle}
+              ?disabled=${!e4.scheduleEnabled}
+              aria-label="Toggle scheduled charging"
+            >
+              <div class="toggle-thumb"></div>
+            </button>
+          </div>
+          <div class="schedule-times ${this._isOn(e4.scheduleEnabled) ? "" : "schedule-times--disabled"}">
+            <div class="schedule-time-field">
+              <label class="schedule-time-label">Start</label>
+              <input
+                type="time"
+                class="schedule-time-input"
+                .value=${(this._state(e4.scheduleStart) ?? "00:00").substring(0, 5)}
+                ?disabled=${!this._isOn(e4.scheduleEnabled) || !e4.scheduleStart}
+                @change=${(ev) => this._onScheduleTimeChange(e4.scheduleStart, ev)}
+              />
+            </div>
+            <div class="schedule-time-field">
+              <label class="schedule-time-label">End</label>
+              <input
+                type="time"
+                class="schedule-time-input"
+                .value=${(this._state(e4.scheduleEnd) ?? "00:00").substring(0, 5)}
+                ?disabled=${!this._isOn(e4.scheduleEnabled) || !e4.scheduleEnd}
+                @change=${(ev) => this._onScheduleTimeChange(e4.scheduleEnd, ev)}
+              />
+            </div>
+          </div>
+        </section>
+
         <!-- Live status -->
         <section class="strat-section">
           <div class="strat-section-label">Live Status</div>
@@ -1349,6 +1392,9 @@ var TuyaEvChargerCard = class extends i4 {
       r4.surplusProfile,
       r4.surplusStartThreshold,
       r4.surplusStopThreshold,
+      r4.scheduleEnabled,
+      r4.scheduleStart,
+      r4.scheduleEnd,
       r4.regulationActive,
       r4.lastDecision,
       r4.surplusRaw,
@@ -1379,6 +1425,9 @@ var TuyaEvChargerCard = class extends i4 {
       surplusProfile: c4.surplus_profile ?? byRole.surplusProfile ?? fb("select", "surplus_profile"),
       surplusStartThreshold: c4.surplus_start_threshold ?? fb("number", "surplus_start_threshold_w"),
       surplusStopThreshold: c4.surplus_stop_threshold ?? fb("number", "surplus_stop_threshold_w"),
+      scheduleEnabled: c4.schedule_enabled ?? byRole.scheduleEnabled ?? fb("switch", "schedule_enabled"),
+      scheduleStart: c4.schedule_start ?? byRole.scheduleStart ?? fb("time", "schedule_start"),
+      scheduleEnd: c4.schedule_end ?? byRole.scheduleEnd ?? fb("time", "schedule_end"),
       regulationActive: c4.regulation_active ?? byRole.regulationActive ?? fb("binary_sensor", "surplus_regulation_active"),
       lastDecision: c4.last_decision ?? byRole.lastDecision ?? fb("sensor", "surplus_last_decision_reason"),
       surplusRaw: c4.surplus_raw ?? byRole.surplusRaw ?? fb("sensor", "surplus_raw_w"),
@@ -1456,6 +1505,15 @@ var TuyaEvChargerCard = class extends i4 {
         case "surplus_stop_threshold":
           result.surplusStopThreshold = entityId;
           break;
+        case "schedule_enabled":
+          result.scheduleEnabled = entityId;
+          break;
+        case "schedule_start":
+          result.scheduleStart = entityId;
+          break;
+        case "schedule_end":
+          result.scheduleEnd = entityId;
+          break;
       }
     }
     return result;
@@ -1529,6 +1587,26 @@ var TuyaEvChargerCard = class extends i4 {
       await this.hass.callService("switch", next === "on" ? "turn_on" : "turn_off", { entity_id: id });
     } catch {
       this._clearOptimisticState(id);
+    }
+  }
+  async _onScheduleToggle() {
+    const id = this._resolvedEntities.scheduleEnabled;
+    if (!this.hass || !id) return;
+    const next = this._isOn(id) ? "off" : "on";
+    this._setOptimisticState(id, next);
+    try {
+      await this.hass.callService("switch", next === "on" ? "turn_on" : "turn_off", { entity_id: id });
+    } catch {
+      this._clearOptimisticState(id);
+    }
+  }
+  async _onScheduleTimeChange(entityId, ev) {
+    if (!this.hass || !entityId) return;
+    const value = ev.target.value;
+    if (!value) return;
+    try {
+      await this.hass.callService("time", "set_value", { entity_id: entityId, value: `${value}:00` });
+    } catch {
     }
   }
   async _onReboot() {
@@ -2069,6 +2147,44 @@ TuyaEvChargerCard.styles = i`
       background: var(--kin-on-primary);
     }
 
+    /* Schedule time pickers */
+    .schedule-times {
+      display: flex;
+      gap: 12px;
+      margin-top: 12px;
+      transition: opacity 0.2s;
+    }
+    .schedule-times--disabled { opacity: 0.35; pointer-events: none; }
+    .schedule-time-field {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .schedule-time-label {
+      font-size: 0.7rem;
+      color: var(--kin-text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .schedule-time-input {
+      background: var(--kin-surface-2);
+      border: 1px solid var(--kin-border);
+      border-radius: 8px;
+      color: var(--kin-text-primary);
+      font-size: 1rem;
+      font-family: inherit;
+      padding: 8px 10px;
+      width: 100%;
+      box-sizing: border-box;
+      color-scheme: dark;
+    }
+    .schedule-time-input:focus {
+      outline: none;
+      border-color: var(--kin-primary);
+    }
+    .schedule-time-input:disabled { opacity: 0.4; cursor: not-allowed; }
+
     /* Profile grid */
     .profile-grid {
       display: grid;
@@ -2521,6 +2637,9 @@ var ENTITY_FIELD_SPECS = [
   { key: "charge_current", label: "Charge current number", domain: "number", suffixes: ["charge_current"] },
   { key: "surplus_start_threshold", label: "Start threshold number", domain: "number", suffixes: ["surplus_start_threshold_w"] },
   { key: "surplus_stop_threshold", label: "Stop threshold number", domain: "number", suffixes: ["surplus_stop_threshold_w"] },
+  { key: "schedule_enabled", label: "Schedule switch", domain: "switch", suffixes: ["schedule_enabled"] },
+  { key: "schedule_start", label: "Schedule start time", domain: "time", suffixes: ["schedule_start"] },
+  { key: "schedule_end", label: "Schedule end time", domain: "time", suffixes: ["schedule_end"] },
   { key: "power", label: "Power sensor", domain: "sensor", suffixes: ["power_l1"] },
   { key: "current", label: "Current sensor", domain: "sensor", suffixes: ["current_l1"] },
   { key: "voltage", label: "Voltage sensor", domain: "sensor", suffixes: ["voltage_l1"] },
