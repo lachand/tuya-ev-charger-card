@@ -550,6 +550,14 @@ o4?.({ LitElement: i4 });
 (s3.litElementVersions ?? (s3.litElementVersions = [])).push("4.2.2");
 
 // src/tuya-ev-charger-card.ts
+var THEME_LABELS = {
+  "kinetic": "KINETIC",
+  "minimal": "MINIMAL",
+  "ocean": "OCEAN",
+  "solar-amber": "SOLAR",
+  "arctic-flow": "ARCTIC",
+  "deep-mono": "MONO"
+};
 var PROFILE_OPTIONS = ["eco", "balanced", "fast"];
 var PROFILE_META = {
   eco: { label: "Eco", start: 2200, stop: 1700, icon: "eco" },
@@ -598,7 +606,7 @@ var TuyaEvChargerCard = class extends i4 {
     const link = document.createElement("link");
     link.id = "tuya-ev-charger-fonts";
     link.rel = "stylesheet";
-    link.href = "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700;900&family=Inter:wght@400;500;600;700&family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap";
+    link.href = "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700;900&family=Inter:wght@400;500;600;700&family=Manrope:wght@400;500;600;700&family=Noto+Serif:wght@400;700&family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap";
     document.head.appendChild(link);
   }
   setConfig(config) {
@@ -685,7 +693,7 @@ var TuyaEvChargerCard = class extends i4 {
         <!-- Header -->
         <header class="dash-header">
           <div>
-            <div class="app-label">KINETIC</div>
+            <div class="app-label">${THEME_LABELS[this._config?.theme ?? "kinetic"]}</div>
             <div class="dash-title">${title}</div>
           </div>
           <div class="chips">
@@ -2691,6 +2699,141 @@ TuyaEvChargerCard.styles = i`
       --kin-pulse-rgba: rgba(0, 229, 255, 0.5);
     }
 
+    /* ── Solar Amber theme (charcoal / amber) ── */
+    :host([theme="solar-amber"]) {
+      --kin-primary: #FFBF00;
+      --kin-on-primary: #1D1B19;
+      --kin-secondary: #FFD54F;
+      --kin-tertiary: #FF9800;
+      --kin-error: #FF5252;
+      --kin-surface: #1D1B19;
+      --kin-surface-low: #232119;
+      --kin-surface-container: #2A2720;
+      --kin-surface-high: #332F26;
+      --kin-surface-highest: #3D382D;
+      --kin-on-surface: #F5F0E8;
+      --kin-on-variant: #B5A882;
+      --kin-outline: #4D4535;
+      --kin-gauge-track: #332F26;
+      --kin-card-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+      --kin-nav-bg: rgba(29, 27, 25, 0.92);
+      --kin-glow-color: rgba(255, 191, 0, 0.55);
+      --kin-primary-alpha-08: rgba(255, 191, 0, 0.08);
+      --kin-primary-alpha-12: rgba(255, 191, 0, 0.12);
+      --kin-primary-alpha-30: rgba(255, 191, 0, 0.3);
+      --kin-pulse-rgba: rgba(255, 191, 0, 0.5);
+      font-family: 'Manrope', 'Inter', sans-serif;
+    }
+    :host([theme="solar-amber"]) .tele-tile {
+      background: radial-gradient(ellipse at top, rgba(255, 191, 0, 0.1) 0%, var(--kin-surface-low) 70%);
+    }
+    :host([theme="solar-amber"]) .gauge-section::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse at center, rgba(255, 191, 0, 0.06) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    :host([theme="solar-amber"]) .gauge-section { position: relative; }
+    :host([theme="solar-amber"]) .strat-section {
+      background: linear-gradient(135deg, var(--kin-surface-container) 0%, rgba(61, 56, 45, 0.4) 100%);
+    }
+
+    /* ── Arctic Flow theme (night blue / cyan glassmorphism) ── */
+    :host([theme="arctic-flow"]) {
+      --kin-primary: #00E5FF;
+      --kin-on-primary: #002030;
+      --kin-secondary: #40C9FF;
+      --kin-tertiary: #7986CB;
+      --kin-error: #FF5252;
+      --kin-surface: #050D1A;
+      --kin-surface-low: #071222;
+      --kin-surface-container: rgba(10, 25, 50, 0.55);
+      --kin-surface-high: #0D2140;
+      --kin-surface-highest: #122A50;
+      --kin-on-surface: #E8F4FF;
+      --kin-on-variant: #7EC8E3;
+      --kin-outline: rgba(255, 255, 255, 0.1);
+      --kin-gauge-track: #0D2140;
+      --kin-card-shadow: 0 12px 60px rgba(0, 229, 255, 0.1);
+      --kin-nav-bg: rgba(5, 13, 26, 0.88);
+      --kin-glow-color: rgba(0, 229, 255, 0.6);
+      --kin-primary-alpha-08: rgba(0, 229, 255, 0.08);
+      --kin-primary-alpha-12: rgba(0, 229, 255, 0.12);
+      --kin-primary-alpha-30: rgba(0, 229, 255, 0.3);
+      --kin-pulse-rgba: rgba(0, 229, 255, 0.5);
+      font-family: 'Space Grotesk', sans-serif;
+    }
+    :host([theme="arctic-flow"]) .strat-section,
+    :host([theme="arctic-flow"]) .tele-tile,
+    :host([theme="arctic-flow"]) .current-box,
+    :host([theme="arctic-flow"]) .diag-card,
+    :host([theme="arctic-flow"]) .debug-item,
+    :host([theme="arctic-flow"]) .live-item {
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    :host([theme="arctic-flow"]) .tele-icon--tertiary,
+    :host([theme="arctic-flow"]) .tele-icon--secondary { text-shadow: 0 0 12px #00E5FF; }
+    :host([theme="arctic-flow"]) .status-bar--active {
+      box-shadow: 0 0 24px rgba(0, 229, 255, 0.15);
+      border-color: rgba(0, 229, 255, 0.25);
+    }
+    :host([theme="arctic-flow"]) .nav-item--active {
+      box-shadow: 0 0 12px rgba(0, 229, 255, 0.2);
+    }
+
+    /* ── Deep Mono theme (noir / blanc / serif) ── */
+    :host([theme="deep-mono"]) {
+      --kin-primary: #FFFFFF;
+      --kin-on-primary: #000000;
+      --kin-secondary: #E0E0E0;
+      --kin-tertiary: #BDBDBD;
+      --kin-error: #FF1744;
+      --kin-surface: #000000;
+      --kin-surface-low: #080808;
+      --kin-surface-container: #0F0F0F;
+      --kin-surface-high: #1A1A1A;
+      --kin-surface-highest: #2A2A2A;
+      --kin-on-surface: #FFFFFF;
+      --kin-on-variant: #9E9E9E;
+      --kin-outline: rgba(255, 255, 255, 0.18);
+      --kin-gauge-track: #1A1A1A;
+      --kin-card-shadow: none;
+      --kin-nav-bg: #000000;
+      --kin-glow-color: rgba(255, 255, 255, 0);
+      --kin-primary-alpha-08: rgba(255, 255, 255, 0.06);
+      --kin-primary-alpha-12: rgba(255, 255, 255, 0.10);
+      --kin-primary-alpha-30: rgba(255, 255, 255, 0.25);
+      --kin-pulse-rgba: rgba(255, 255, 255, 0.4);
+      font-family: 'Inter', sans-serif;
+    }
+    :host([theme="deep-mono"]) .page-title,
+    :host([theme="deep-mono"]) .dash-title {
+      font-family: 'Noto Serif', Georgia, serif;
+      font-weight: 400;
+      letter-spacing: 0.01em;
+    }
+    :host([theme="deep-mono"]) .gauge-value {
+      font-family: 'Noto Serif', Georgia, serif;
+      font-weight: 700;
+    }
+    :host([theme="deep-mono"]) .strat-section,
+    :host([theme="deep-mono"]) .tele-tile,
+    :host([theme="deep-mono"]) .current-box,
+    :host([theme="deep-mono"]) .diag-card,
+    :host([theme="deep-mono"]) .debug-item,
+    :host([theme="deep-mono"]) .live-item {
+      background: transparent;
+      border: 0.5px solid rgba(255, 255, 255, 0.18);
+      box-shadow: none;
+    }
+    :host([theme="deep-mono"]) .btn-action,
+    :host([theme="deep-mono"]) .btn-emergency { box-shadow: none; }
+    :host([theme="deep-mono"]) .gauge-arc--glow { filter: none; }
+    :host([theme="deep-mono"]) .bottom-nav { border-top: 0.5px solid rgba(255, 255, 255, 0.18); }
+
     /* ── Responsive ── */
     @media (max-width: 380px) {
       .tele-grid, .action-grid { grid-template-columns: 1fr; }
@@ -2761,9 +2904,12 @@ var TuyaEvChargerCardEditor = class extends i4 {
             .value=${cfg.theme ?? "kinetic"}
             @change=${(e4) => this._fireConfigChanged({ ...cfg, theme: e4.target.value })}
           >
-            <option value="kinetic">Kinetic (dark / neon green)</option>
-            <option value="minimal">Minimal (light / blue)</option>
-            <option value="ocean">Ocean (dark blue / cyan)</option>
+            <option value="kinetic">Kinetic — dark, neon green</option>
+            <option value="solar-amber">Solar Amber — charbon, ambre chaud</option>
+            <option value="arctic-flow">Arctic Flow — nuit bleue, glassmorphism cyan</option>
+            <option value="deep-mono">Deep Mono — noir absolu, blanc pur, serif</option>
+            <option value="ocean">Ocean — dark blue, cyan</option>
+            <option value="minimal">Minimal — light, bleu</option>
           </select>
         </label>
         <label>
