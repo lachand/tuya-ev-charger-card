@@ -22,9 +22,12 @@ interface HomeAssistant {
   ) => Promise<unknown>;
 }
 
+type ThemeId = "kinetic" | "minimal" | "ocean";
+
 interface CardConfig {
   type: string;
   title?: string;
+  theme?: ThemeId;
   charger_name?: string;
   entities?: {
     power?: string;
@@ -175,6 +178,7 @@ class TuyaEvChargerCard extends LitElement {
       throw new Error("Invalid card configuration.");
     }
     this._config = config;
+    this.setAttribute("theme", config.theme ?? "kinetic");
     this._resolvedEntities = this._resolveEntities(config);
     this._graphHistory = [];
     this._graphHistoryLoading = false;
@@ -392,7 +396,7 @@ class TuyaEvChargerCard extends LitElement {
           <!-- Track -->
           <circle
             cx="50" cy="50" r="${GAUGE_R}"
-            fill="none" stroke="#20201f" stroke-width="8"
+            class="gauge-track"
           />
           <!-- Arc -->
           <circle
@@ -1302,6 +1306,16 @@ class TuyaEvChargerCard extends LitElement {
       --kin-on-variant: #adaaaa;
       --kin-outline: #484847;
 
+      /* Extended theme tokens */
+      --kin-gauge-track: #20201f;
+      --kin-card-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+      --kin-nav-bg: rgba(19, 19, 19, 0.85);
+      --kin-glow-color: rgba(142, 255, 113, 0.55);
+      --kin-primary-alpha-08: rgba(142, 255, 113, 0.08);
+      --kin-primary-alpha-12: rgba(142, 255, 113, 0.12);
+      --kin-primary-alpha-30: rgba(142, 255, 113, 0.3);
+      --kin-pulse-rgba: rgba(142, 255, 113, 0.5);
+
       display: block;
       font-family: 'Inter', 'Segoe UI', sans-serif;
       color: var(--kin-on-surface);
@@ -1312,7 +1326,7 @@ class TuyaEvChargerCard extends LitElement {
       border-radius: 20px;
       overflow: hidden;
       border: none;
-      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+      box-shadow: var(--kin-card-shadow);
     }
 
     .pad { padding: 16px; }
@@ -1388,9 +1402,9 @@ class TuyaEvChargerCard extends LitElement {
       text-transform: uppercase;
     }
     .chip-ok {
-      background: rgba(142, 255, 113, 0.12);
+      background: var(--kin-primary-alpha-12);
       color: var(--kin-primary);
-      border: 1px solid rgba(142, 255, 113, 0.3);
+      border: 1px solid var(--kin-primary-alpha-30);
     }
     .chip-off {
       background: rgba(255, 255, 255, 0.05);
@@ -1417,8 +1431,14 @@ class TuyaEvChargerCard extends LitElement {
       height: 100%;
     }
 
+    .gauge-track {
+      fill: none;
+      stroke: var(--kin-gauge-track);
+      stroke-width: 8;
+    }
+
     .gauge-arc--glow {
-      filter: drop-shadow(0 0 10px rgba(142, 255, 113, 0.55));
+      filter: drop-shadow(0 0 10px var(--kin-glow-color));
     }
 
     .gauge-center {
@@ -1483,9 +1503,9 @@ class TuyaEvChargerCard extends LitElement {
     }
 
     @keyframes pulse-ring {
-      0%   { box-shadow: 0 0 0 0 rgba(142, 255, 113, 0.5); }
-      70%  { box-shadow: 0 0 0 7px rgba(142, 255, 113, 0); }
-      100% { box-shadow: 0 0 0 0 rgba(142, 255, 113, 0); }
+      0%   { box-shadow: 0 0 0 0 var(--kin-pulse-rgba); }
+      70%  { box-shadow: 0 0 0 7px transparent; }
+      100% { box-shadow: 0 0 0 0 transparent; }
     }
 
     .status-label {
@@ -1762,15 +1782,15 @@ class TuyaEvChargerCard extends LitElement {
     }
     .schedule-time-label {
       font-size: 0.7rem;
-      color: var(--kin-text-secondary);
+      color: var(--kin-on-variant);
       text-transform: uppercase;
       letter-spacing: 0.06em;
     }
     .schedule-time-input {
-      background: var(--kin-surface-2);
-      border: 1px solid var(--kin-border);
+      background: var(--kin-surface-high);
+      border: 1px solid var(--kin-outline);
       border-radius: 8px;
-      color: var(--kin-text-primary);
+      color: var(--kin-on-surface);
       font-size: 1rem;
       font-family: inherit;
       padding: 8px 10px;
@@ -1805,8 +1825,8 @@ class TuyaEvChargerCard extends LitElement {
       transition: border-color 0.15s, background 0.15s;
     }
     .profile-btn--active {
-      border-color: rgba(142, 255, 113, 0.5);
-      background: rgba(142, 255, 113, 0.08);
+      border-color: var(--kin-primary-alpha-30);
+      background: var(--kin-primary-alpha-08);
       color: var(--kin-on-surface);
     }
     .profile-btn:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -2183,7 +2203,7 @@ class TuyaEvChargerCard extends LitElement {
     .bottom-nav {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
-      background: rgba(19, 19, 19, 0.85);
+      background: var(--kin-nav-bg);
       backdrop-filter: blur(16px);
       border-top: 1px solid rgba(255,255,255,0.06);
       padding: 10px 8px 14px;
@@ -2219,6 +2239,58 @@ class TuyaEvChargerCard extends LitElement {
       font-weight: 700;
       letter-spacing: 0.12em;
       text-transform: uppercase;
+    }
+
+    /* ── Minimal theme (light / blue) ── */
+    :host([theme="minimal"]) {
+      --kin-primary: #2563eb;
+      --kin-on-primary: #ffffff;
+      --kin-secondary: #0891b2;
+      --kin-tertiary: #7c3aed;
+      --kin-error: #dc2626;
+      --kin-surface: #ffffff;
+      --kin-surface-low: #f4f4f5;
+      --kin-surface-container: #e4e4e7;
+      --kin-surface-high: #d4d4d8;
+      --kin-surface-highest: #a1a1aa;
+      --kin-on-surface: #09090b;
+      --kin-on-variant: #71717a;
+      --kin-outline: #d4d4d8;
+      --kin-gauge-track: #e4e4e7;
+      --kin-card-shadow: 0 4px 24px rgba(0, 0, 0, 0.1);
+      --kin-nav-bg: rgba(255, 255, 255, 0.92);
+      --kin-glow-color: rgba(37, 99, 235, 0.5);
+      --kin-primary-alpha-08: rgba(37, 99, 235, 0.08);
+      --kin-primary-alpha-12: rgba(37, 99, 235, 0.12);
+      --kin-primary-alpha-30: rgba(37, 99, 235, 0.3);
+      --kin-pulse-rgba: rgba(37, 99, 235, 0.5);
+      font-family: 'Inter', system-ui, sans-serif;
+    }
+    :host([theme="minimal"]) .schedule-time-input { color-scheme: light; }
+
+    /* ── Ocean theme (dark blue / cyan) ── */
+    :host([theme="ocean"]) {
+      --kin-primary: #00e5ff;
+      --kin-on-primary: #003040;
+      --kin-secondary: #40c9ff;
+      --kin-tertiary: #a78bfa;
+      --kin-error: #ff7351;
+      --kin-surface: #020f1a;
+      --kin-surface-low: #061524;
+      --kin-surface-container: #0a1e35;
+      --kin-surface-high: #0d2645;
+      --kin-surface-highest: #113050;
+      --kin-on-surface: #e0f4ff;
+      --kin-on-variant: #7ec8e3;
+      --kin-outline: #1e4060;
+      --kin-gauge-track: #0d2645;
+      --kin-card-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+      --kin-nav-bg: rgba(2, 15, 26, 0.9);
+      --kin-glow-color: rgba(0, 229, 255, 0.55);
+      --kin-primary-alpha-08: rgba(0, 229, 255, 0.08);
+      --kin-primary-alpha-12: rgba(0, 229, 255, 0.12);
+      --kin-primary-alpha-30: rgba(0, 229, 255, 0.3);
+      --kin-pulse-rgba: rgba(0, 229, 255, 0.5);
     }
 
     /* ── Responsive ── */
@@ -2316,6 +2388,18 @@ class TuyaEvChargerCardEditor extends LitElement {
             @input=${(e: Event) =>
               this._updateRootText("title", (e.target as HTMLInputElement).value)}
           />
+        </label>
+        <label>
+          <span>Theme</span>
+          <select
+            .value=${cfg.theme ?? "kinetic"}
+            @change=${(e: Event) =>
+              this._fireConfigChanged({ ...cfg, theme: (e.target as HTMLSelectElement).value as ThemeId })}
+          >
+            <option value="kinetic">Kinetic (dark / neon green)</option>
+            <option value="minimal">Minimal (light / blue)</option>
+            <option value="ocean">Ocean (dark blue / cyan)</option>
+          </select>
         </label>
         <label>
           <span>Detected EV Charger instance</span>
