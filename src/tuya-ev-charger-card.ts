@@ -278,8 +278,8 @@ class TuyaEvChargerCard extends LitElement {
       this._attrNumber(chargeCurrentEntity, "native_step") ?? 1;
 
     const title = this._config?.title ?? "EV Charger";
-    const isWorking =
-      chargeOn || workState.toUpperCase() === "WORKING";
+    const wsInfo = this._workStateInfo(workState);
+    const isWorking = workState.toUpperCase() === "WORKING" || chargeOn;
 
     return html`
       <div class="dashboard">
@@ -290,8 +290,8 @@ class TuyaEvChargerCard extends LitElement {
             <div class="dash-title">${title}</div>
           </div>
           <div class="chips">
-            <span class="chip ${chargeOn ? "chip-ok" : "chip-off"}">
-              ${chargeOn ? "Charging" : "Idle"}
+            <span class="chip ${wsInfo.chipClass}">
+              ${wsInfo.chipLabel}
             </span>
             <span class="chip ${surplusOn ? "chip-ok" : "chip-off"}">
               ${surplusOn ? "Surplus" : "Manual"}
@@ -306,11 +306,11 @@ class TuyaEvChargerCard extends LitElement {
         <section class="gauge-section">
           ${this._renderGauge(powerW, isWorking)}
           <!-- Status bar -->
-          <div class="status-bar ${isWorking ? "status-bar--active" : ""}">
-            <span class="status-dot ${isWorking ? "status-dot--pulse" : ""}"></span>
+          <div class="status-bar ${wsInfo.barClass}">
+            <span class="status-dot ${wsInfo.dotClass}"></span>
             <span class="status-label">${workState.toUpperCase()}</span>
             <div class="status-divider"></div>
-            <span class="mso status-icon">ev_station</span>
+            <span class="mso status-icon ${wsInfo.iconClass}">${wsInfo.icon}</span>
             <span class="status-sub">${surplusOn ? "SOLAR" : "GRID"}</span>
           </div>
         </section>
@@ -961,6 +961,33 @@ class TuyaEvChargerCard extends LitElement {
     return this._entity(id)?.state;
   }
 
+  private _workStateInfo(state: string): {
+    icon: string; barClass: string; dotClass: string;
+    iconClass: string; chipLabel: string; chipClass: string;
+  } {
+    switch (state.toUpperCase()) {
+      case "WORKING":
+        return { icon: "bolt",           barClass: "status-bar--active",    dotClass: "status-dot--pulse",     iconClass: "status-icon--ok",        chipLabel: "Charging",  chipClass: "chip-ok" };
+      case "IDLEINS":
+        return { icon: "cable",          barClass: "status-bar--connected",  dotClass: "status-dot--connected", iconClass: "status-icon--connected", chipLabel: "Connected", chipClass: "chip-connected" };
+      case "WAIT":
+        return { icon: "schedule",       barClass: "status-bar--wait",       dotClass: "status-dot--wait",      iconClass: "status-icon--warn",      chipLabel: "Waiting",   chipClass: "chip-wait" };
+      case "ERRORPAUSE":
+        return { icon: "warning",        barClass: "status-bar--error",      dotClass: "status-dot--error",     iconClass: "status-icon--error",     chipLabel: "Error",     chipClass: "chip-error" };
+      case "PAUSE":
+        return { icon: "pause_circle",   barClass: "status-bar--wait",       dotClass: "status-dot--wait",      iconClass: "status-icon--warn",      chipLabel: "Paused",    chipClass: "chip-wait" };
+      case "STOP":
+        return { icon: "stop_circle",    barClass: "",                       dotClass: "",                      iconClass: "",                       chipLabel: "Stopped",   chipClass: "chip-off" };
+      case "SLEEP":
+        return { icon: "bedtime",        barClass: "",                       dotClass: "",                      iconClass: "",                       chipLabel: "Sleep",     chipClass: "chip-off" };
+      case "EMPTY":
+        return { icon: "device_unknown", barClass: "",                       dotClass: "",                      iconClass: "",                       chipLabel: "Unknown",   chipClass: "chip-off" };
+      case "IDLE":
+      default:
+        return { icon: "ev_station",     barClass: "",                       dotClass: "",                      iconClass: "",                       chipLabel: "Idle",      chipClass: "chip-off" };
+    }
+  }
+
   private _isOn(id?: string): boolean {
     return this._state(id) === "on";
   }
@@ -1415,6 +1442,21 @@ class TuyaEvChargerCard extends LitElement {
       color: var(--kin-primary);
       border: 1px solid var(--kin-primary-alpha-30);
     }
+    .chip-connected {
+      background: color-mix(in srgb, var(--kin-secondary) 12%, transparent);
+      color: var(--kin-secondary);
+      border: 1px solid color-mix(in srgb, var(--kin-secondary) 30%, transparent);
+    }
+    .chip-wait {
+      background: color-mix(in srgb, var(--kin-tertiary) 12%, transparent);
+      color: var(--kin-tertiary);
+      border: 1px solid color-mix(in srgb, var(--kin-tertiary) 30%, transparent);
+    }
+    .chip-error {
+      background: color-mix(in srgb, var(--kin-error) 12%, transparent);
+      color: var(--kin-error);
+      border: 1px solid color-mix(in srgb, var(--kin-error) 30%, transparent);
+    }
     .chip-off {
       background: rgba(255, 255, 255, 0.05);
       color: var(--kin-on-variant);
@@ -1495,9 +1537,10 @@ class TuyaEvChargerCard extends LitElement {
       border-radius: 999px;
       border: 1px solid rgba(255, 255, 255, 0.06);
     }
-    .status-bar--active {
-      border-color: rgba(142, 255, 113, 0.2);
-    }
+    .status-bar--active    { border-color: rgba(142, 255, 113, 0.2); }
+    .status-bar--connected { border-color: color-mix(in srgb, var(--kin-secondary) 30%, transparent); }
+    .status-bar--wait      { border-color: color-mix(in srgb, var(--kin-tertiary)  30%, transparent); }
+    .status-bar--error     { border-color: color-mix(in srgb, var(--kin-error)     30%, transparent); }
 
     .status-dot {
       width: 10px;
@@ -1506,10 +1549,10 @@ class TuyaEvChargerCard extends LitElement {
       background: var(--kin-on-variant);
       flex-shrink: 0;
     }
-    .status-dot--pulse {
-      background: var(--kin-primary);
-      animation: pulse-ring 1.5s ease-out infinite;
-    }
+    .status-dot--pulse     { background: var(--kin-primary);    animation: pulse-ring 1.5s ease-out infinite; }
+    .status-dot--connected { background: var(--kin-secondary); }
+    .status-dot--wait      { background: var(--kin-tertiary);  }
+    .status-dot--error     { background: var(--kin-error);     animation: pulse-ring 1s ease-out infinite; }
 
     @keyframes pulse-ring {
       0%   { box-shadow: 0 0 0 0 var(--kin-pulse-rgba); }
@@ -1528,10 +1571,11 @@ class TuyaEvChargerCard extends LitElement {
       height: 14px;
       background: rgba(255,255,255,0.15);
     }
-    .status-icon {
-      font-size: 1rem;
-      color: var(--kin-secondary);
-    }
+    .status-icon             { font-size: 1rem; color: var(--kin-secondary); }
+    .status-icon--ok         { color: var(--kin-primary);   }
+    .status-icon--connected  { color: var(--kin-secondary); }
+    .status-icon--warn       { color: var(--kin-tertiary);  }
+    .status-icon--error      { color: var(--kin-error);     }
     .status-sub {
       font-size: 0.68rem;
       font-weight: 700;
