@@ -1448,16 +1448,16 @@ var TuyaEvChargerCard = class extends i4 {
     return {
       power: c4.power ?? byRole.power ?? fb("sensor", "power_l1"),
       current: c4.current ?? byRole.current ?? fb("sensor", "current_l1"),
-      voltage: c4.voltage ?? fb("sensor", "voltage_l1"),
-      temperature: c4.temperature ?? fb("sensor", "temperature"),
-      workState: c4.work_state ?? fb("sensor", "work_state"),
+      voltage: c4.voltage ?? byRole.voltage ?? fb("sensor", "voltage_l1"),
+      temperature: c4.temperature ?? byRole.temperature ?? fb("sensor", "temperature"),
+      workState: c4.work_state ?? byRole.workState ?? fb("sensor", "work_state"),
       chargeCurrent: c4.charge_current ?? byRole.chargeCurrent ?? fb("number", "charge_current"),
       chargeSession: c4.charge_session ?? byRole.chargeSession ?? fb("switch", "charge_session"),
-      reboot: c4.reboot ?? fb("button", "reboot_charger"),
+      reboot: c4.reboot ?? byRole.reboot ?? fb("button", "reboot_charger"),
       surplusMode: c4.surplus_mode ?? byRole.surplusMode ?? fb("switch", "surplus_mode"),
       surplusProfile: c4.surplus_profile ?? byRole.surplusProfile ?? fb("select", "surplus_profile"),
-      surplusStartThreshold: c4.surplus_start_threshold ?? fb("number", "surplus_start_threshold_w"),
-      surplusStopThreshold: c4.surplus_stop_threshold ?? fb("number", "surplus_stop_threshold_w"),
+      surplusStartThreshold: c4.surplus_start_threshold ?? byRole.surplusStartThreshold ?? fb("number", "surplus_start_threshold_w"),
+      surplusStopThreshold: c4.surplus_stop_threshold ?? byRole.surplusStopThreshold ?? fb("number", "surplus_stop_threshold_w"),
       scheduleEnabled: c4.schedule_enabled ?? byRole.scheduleEnabled ?? fb("switch", "schedule_enabled"),
       scheduleStart: c4.schedule_start ?? byRole.scheduleStart ?? fb("time", "schedule_start"),
       scheduleEnd: c4.schedule_end ?? byRole.scheduleEnd ?? fb("time", "schedule_end"),
@@ -1467,8 +1467,8 @@ var TuyaEvChargerCard = class extends i4 {
       surplusEffective: c4.surplus_effective ?? byRole.surplusEffective ?? fb("sensor", "surplus_effective_w"),
       surplusDischargeOverLimit: c4.surplus_discharge_over_limit ?? byRole.surplusDischargeOverLimit ?? fb("sensor", "surplus_battery_discharge_over_limit_w"),
       surplusTargetCurrent: c4.surplus_target_current ?? byRole.surplusTargetCurrent ?? fb("sensor", "surplus_target_current_a"),
-      selftest: c4.selftest ?? fb("sensor", "selftest"),
-      alarm: c4.alarm ?? fb("sensor", "alarm")
+      selftest: c4.selftest ?? byRole.selftest ?? fb("sensor", "selftest"),
+      alarm: c4.alarm ?? byRole.alarm ?? fb("sensor", "alarm")
     };
   }
   _discoverByRole() {
